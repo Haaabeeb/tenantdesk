@@ -1,7 +1,7 @@
 
 using System;
 
-namespace TenantDesk.Domain.Entities;
+namespace TenantDesk.Domain.Entities{
 
 public class Tenant
 {
@@ -86,4 +86,6 @@ public class Tenant
     {
         UpdatedAt = DateTime.UtcNow;
     }
+}
+
 }
