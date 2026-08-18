@@ -15,6 +15,8 @@ public class User
     public DateTime CreatedAt { get; private set; }
     public DateTime? UpdatedAt { get; private set; }
 
+    public Tenant Tenant { get; private set; } = null!;
+    
     private User() { }
 
     public User(Guid tenantId, string email, UserRole role, string? microsoftUserId = null)
