@@ -12,6 +12,7 @@ public class Sla
     public int ResponseTime { get; private set; }
     public int ResolutionTime { get; private set; }
     public DateTime? UpdatedAt { get; private set; }
+    public DateTime CreatedAt { get; private set; }
  
     public Tenant Tenant { get; private set; } = null!;
 
@@ -32,6 +33,7 @@ public class Sla
         Priority = priority;
         ResponseTime = responseTime;
         ResolutionTime = resolutionTime;
+        CreatedAt = DateTime.UtcNow;
     }
 
     public void UpdateTimes(int responseTime, int resolutionTime)
