@@ -1,0 +1,10 @@
+
+namespace TenantDesk.Application.DTOs.Tenants;
+
+// Returned from: GET /api/tenants
+public record TenantListDto(
+    Guid TenantId,
+    string TenantName,
+    string Subdomain,
+    bool IsActive
+);
