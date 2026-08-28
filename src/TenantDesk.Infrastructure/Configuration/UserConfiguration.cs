@@ -34,6 +34,7 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
 
         builder.Property(u => u.UpdatedAt)
             .IsRequired(false);
+        builder.Property(u => u.PasswordHash).IsRequired();
 
         builder.HasOne(u => u.Tenant)
             .WithMany()

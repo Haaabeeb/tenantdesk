@@ -19,17 +19,20 @@ public class User
     
     private User() { }
 
-    public User(Guid tenantId, string email, UserRole role, string? microsoftUserId = null)
+    public User(Guid tenantId, string email, string passwordHash, UserRole role, string? microsoftUserId = null)
     {
-       
         if (tenantId == Guid.Empty)
             throw new ArgumentException("Tenant ID cannot be empty.", nameof(tenantId));
 
         if (string.IsNullOrWhiteSpace(email))
             throw new ArgumentException("Email cannot be null or empty.", nameof(email));
 
+        if (string.IsNullOrWhiteSpace(passwordHash))
+            throw new ArgumentException("Password hash cannot be empty.", nameof(passwordHash));
+
         TenantId = tenantId;
         Email = email.Trim().ToLower();
+        PasswordHash = passwordHash;
         Role = role;
         MicrosoftUserId = microsoftUserId;
         IsActive = true;
@@ -39,6 +42,15 @@ public class User
     public void ChangeRole(UserRole newRole)
     {
         Role = newRole;
+        UpdateTimestamp();
+    }
+    public string PasswordHash { get; private set; } = null!;    
+    public void SetPassword(string passwordHash)
+    {
+        if (string.IsNullOrWhiteSpace(passwordHash))
+            throw new ArgumentException("Password hash cannot be empty.", nameof(passwordHash));
+
+        PasswordHash = passwordHash;
         UpdateTimestamp();
     }
 
