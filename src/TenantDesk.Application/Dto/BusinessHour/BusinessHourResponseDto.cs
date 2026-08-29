@@ -1,5 +1,5 @@
 
-namespace TenantDesk.Application.DTOs.BusinessHours;
+namespace TenantDesk.Application.Dto.BusinessHour;
 
 // Returned from: GET/POST/PUT /api/business-hours/{businessHourId}
 public record BusinessHourResponseDto(

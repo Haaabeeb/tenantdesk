@@ -1,5 +1,5 @@
 
-namespace TenantDesk.Application.DTOs.BusinessHours;
+namespace TenantDesk.Application.Dto.BusinessHour;
 
 // Sent to: PUT /api/business-hours/{businessHourId}
 public record UpdateBusinessHourDto(
