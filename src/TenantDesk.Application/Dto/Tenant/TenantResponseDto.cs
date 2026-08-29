@@ -1,5 +1,5 @@
 
-namespace TenantDesk.Application.DTOs.Tenants;
+namespace TenantDesk.Application.Dto.Tenant;
 
 // Returned from: GET/POST/PUT /api/tenants/{tenantId}
 public record TenantResponseDto(

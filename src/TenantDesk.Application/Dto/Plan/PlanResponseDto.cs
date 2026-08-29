@@ -1,5 +1,5 @@
 
-namespace TenantDesk.Application.DTOs.Plans;
+namespace TenantDesk.Application.Dto.Plan;
 
 // Returned from: GET/POST /api/plans
 public record PlanResponseDto(
