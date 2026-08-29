@@ -1,6 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using TenantDesk.Application.Common.Interfaces;
 using TenantDesk.Infrastructure.Data;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Services;
+using TenantDesk.Infrastructure.Repositories;
 using TenantDesk.Api.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -20,6 +23,9 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 );
 
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+
+builder.Services.AddScoped<IPlanRepository, PlanRepository>();
+builder.Services.AddScoped<PlanService>();
 
 builder.Services.AddHttpContextAccessor();
 
