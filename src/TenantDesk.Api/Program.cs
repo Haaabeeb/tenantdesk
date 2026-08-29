@@ -21,6 +21,16 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 
+<<<<<<< Updated upstream
+=======
+builder.Services.AddScoped<IPlanRepository, PlanRepository>();
+builder.Services.AddScoped<PlanService>();
+
+builder.Services.AddScoped<ITenantRepository, TenantRepository>();
+builder.Services.AddScoped<TenantService>();
+
+
+>>>>>>> Stashed changes
 builder.Services.AddHttpContextAccessor();
 
 var app = builder.Build();
