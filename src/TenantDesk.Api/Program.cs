@@ -2,7 +2,9 @@ using Microsoft.EntityFrameworkCore;
 using TenantDesk.Application.Common.Interfaces;
 using TenantDesk.Infrastructure.Data;
 using TenantDesk.Api.Middleware;
-
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
