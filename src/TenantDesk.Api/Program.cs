@@ -26,8 +26,13 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 
+
 builder.Services.AddScoped<IPlanRepository, PlanRepository>();
 builder.Services.AddScoped<PlanService>();
+
+builder.Services.AddScoped<ITenantRepository, TenantRepository>();
+builder.Services.AddScoped<TenantService>();
+
 
 builder.Services.AddHttpContextAccessor();
 
