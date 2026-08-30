@@ -1,6 +1,6 @@
 using TenantDesk.Domain.Enums;
 
-namespace TenantDesk.Application.DTOs.Slas;
+namespace TenantDesk.Application.Dto.Sla;
 
 // Sent to: POST /api/tenants/{tenantId}/slas
 public record CreateSlaDto(

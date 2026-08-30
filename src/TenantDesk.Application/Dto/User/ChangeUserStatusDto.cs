@@ -1,5 +1,5 @@
 
-namespace TenantDesk.Application.DTOs.Users;
+namespace TenantDesk.Application.Dto.User;
 
 // PATCH /api/users/{userId}/status
 public record ChangeUserStatusDto(

@@ -1,7 +1,7 @@
 
 using TenantDesk.Domain.Enums;
 
-namespace TenantDesk.Application.DTOs.Users;
+namespace TenantDesk.Application.Dto.User;
 
 // Returned from: GET/POST/PUT /api/users/{userId}
 public record UserResponseDto(

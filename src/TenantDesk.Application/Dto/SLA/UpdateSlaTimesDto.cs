@@ -1,5 +1,5 @@
 
-namespace TenantDesk.Application.DTOs.Slas;
+namespace TenantDesk.Application.Dto.Sla;
 
 // Sent to: PUT /api/slas/{slaId}/times
 public record UpdateSlaTimesDto(

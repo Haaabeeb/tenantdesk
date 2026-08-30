@@ -1,6 +1,6 @@
 using TenantDesk.Domain.Enums;
 
-namespace TenantDesk.Application.DTOs.Slas;
+namespace TenantDesk.Application.Dto.Sla;
 
 // Returned from: GET/POST/PUT /api/slas/{slaId}
 public record SlaResponseDto(

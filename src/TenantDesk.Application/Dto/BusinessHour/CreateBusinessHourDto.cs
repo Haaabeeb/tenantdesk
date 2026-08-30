@@ -1,5 +1,5 @@
 
-namespace TenantDesk.Application.DTOs.BusinessHours;
+namespace TenantDesk.Application.Dto.BusinessHour;
 
 // Sent to: POST /api/tenants/{tenantId}/business-hours
 public record CreateBusinessHourDto(

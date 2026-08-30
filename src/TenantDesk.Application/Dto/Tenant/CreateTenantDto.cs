@@ -1,5 +1,6 @@
 
-namespace TenantDesk.Application.DTOs.Tenants;
+namespace TenantDesk.Application.Dto.Tenant;
+
 
 // Sent to: POST /api/tenants
 public record CreateTenantDto(

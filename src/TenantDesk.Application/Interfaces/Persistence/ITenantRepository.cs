@@ -11,6 +11,7 @@ public interface ITenantRepository
     Task<IEnumerable<Tenant>> GetActiveAsync();
     Task<IEnumerable<Tenant>> GetByPlanAsync(Guid planId);
     Task<bool> ExistsBySubdomainAsync(string subdomain);
+    
     Task AddAsync(Tenant tenant);
     Task UpdateAsync(Tenant tenant);
     Task DeleteAsync(Guid id);
