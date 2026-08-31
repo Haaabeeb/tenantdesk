@@ -6,6 +6,5 @@ namespace TenantDesk.Application.Dto.User;
 // Sent to: POST /api/tenants/{tenantId}/users
 public record CreateUserDto(
     string Email,
-    string? MicrosoftUserId,
     UserRole Role
 );

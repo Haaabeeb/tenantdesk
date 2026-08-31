@@ -1,7 +1,7 @@
-// Interfaces/Services/ICurrentUserService.cs
+
 using TenantDesk.Domain.Enums;
 
-namespace TenantDesk.Application.Interfaces.Services;
+namespace TenantDesk.Application.Interfaces.Identity;
 
 public interface ICurrentUserService
 {
