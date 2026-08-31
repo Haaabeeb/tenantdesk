@@ -3,6 +3,10 @@ using TenantDesk.Application.Common.Interfaces;
 using TenantDesk.Application.Interfaces;
 using TenantDesk.Application.Interfaces.Identity;
 using TenantDesk.Infrastructure.Data;
+using TenantDesk.Application.Services;
+using TenantDesk.Infrastructure.Repositories;
+using TenantDesk.Infrastructure.Identity;
+using TenantDesk.Infrastructure.Services;
 using TenantDesk.Api.Middleware;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
@@ -28,13 +32,12 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 
-
+// --- from development: Plan + Tenant (Phase 2) ---
 builder.Services.AddScoped<IPlanRepository, PlanRepository>();
 builder.Services.AddScoped<PlanService>();
-
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<TenantService>();
-
+// --- end Phase 2 ---
 
 builder.Services.AddHttpContextAccessor();
 
@@ -62,9 +65,8 @@ builder.Services.AddAuthorization();
 // --- end JWT Authentication setup ---
 
 // --- Application services (Phase 3: Auth + User) ---
-builder.Services.AddScoped<IUserRepository, UserRepository>();
-builder.Services.AddScoped<ITenantRepository, TenantRepository>();
-builder.Services.AddScoped<UserService>();
+//builder.Services.AddScoped<IUserRepository, UserRepository>();
+//builder.Services.AddScoped<UserService>();
 builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
 builder.Services.AddScoped<ICurrentTenantService, CurrentTenantService>();
 builder.Services.AddScoped<IAuthService, AuthService>();

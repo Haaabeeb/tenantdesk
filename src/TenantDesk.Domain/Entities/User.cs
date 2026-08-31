@@ -8,16 +8,17 @@ public class User
     public Guid UserId { get; private set; }
     public Guid TenantId { get; private set; }
     public string Email { get; private set; } = null!;
+    public string? MicrosoftUserId { get; private set; }
     public UserRole Role { get; private set; }
     public bool IsActive { get; private set; }
     public DateTime CreatedAt { get; private set; }
     public DateTime? UpdatedAt { get; private set; }
 
     public Tenant Tenant { get; private set; } = null!;
-    
+
     private User() { }
 
-    public User(Guid tenantId, string email, UserRole role)
+    public User(Guid tenantId, string email, UserRole role, string? microsoftUserId = null)
     {
         if (tenantId == Guid.Empty)
             throw new ArgumentException("Tenant ID cannot be empty.", nameof(tenantId));
@@ -28,11 +29,9 @@ public class User
         TenantId = tenantId;
         Email = email.Trim().ToLower();
         Role = role;
+        MicrosoftUserId = microsoftUserId;
         IsActive = true;
         CreatedAt = DateTime.UtcNow;
-        // PasswordHash stays empty until SetPassword() is called explicitly —
-        // this makes the "create user, then hash password" registration flow
-        // visible in code instead of hiding it behind a placeholder string.
     }
 
     public void ChangeRole(UserRole newRole)
@@ -40,7 +39,9 @@ public class User
         Role = newRole;
         UpdateTimestamp();
     }
+
     public string PasswordHash { get; private set; } = string.Empty;
+
     public void SetPassword(string passwordHash)
     {
         if (string.IsNullOrWhiteSpace(passwordHash))

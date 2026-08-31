@@ -14,18 +14,15 @@ public class TokenService : ITokenService
 
     public TokenService(IConfiguration config) => _config = config;
 
-    public (string Token, DateTime ExpiresAt) GenerateToken(User user)
+    public string TokenGenerateToken(User user)
     {
         var jwtSection = _config.GetSection("Jwt");
 
-        
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSection["Key"]!));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
-        
         var expiresAt = DateTime.UtcNow.AddHours(8);
 
-       
         var claims = new List<Claim>
         {
             new Claim("local_user_id", user.UserId.ToString()),
@@ -33,7 +30,6 @@ public class TokenService : ITokenService
             new Claim(ClaimTypes.Email, user.Email),
             new Claim(ClaimTypes.Role, user.Role.ToString())
         };
-      
 
         var token = new JwtSecurityToken(
             issuer: jwtSection["Issuer"],
@@ -43,11 +39,6 @@ public class TokenService : ITokenService
             signingCredentials: creds
         );
 
-       
-        var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
-
-        return (tokenString, expiresAt);
+        return new JwtSecurityTokenHandler().WriteToken(token);
     }
-
-   
 }
