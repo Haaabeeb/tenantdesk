@@ -5,14 +5,9 @@ using TenantDesk.Domain.Entities;
 
 namespace TenantDesk.Application.Services;
 
-public class PlanService
+public class PlanService(IPlanRepository repository)
 {
-    private readonly IPlanRepository _repository;
-
-    public PlanService(IPlanRepository repository)
-    {
-        _repository = repository;
-    }
+    private readonly IPlanRepository _repository = repository;
 
     public async Task<PlanResponseDto> CreateAsync(CreatePlanDto dto)
     {

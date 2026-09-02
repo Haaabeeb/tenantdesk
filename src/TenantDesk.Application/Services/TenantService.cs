@@ -4,16 +4,10 @@ using TenantDesk.Domain.Entities;
 
 namespace TenantDesk.Application.Services;
 
-public class TenantService
+public class TenantService(ITenantRepository tenantRepository, IPlanRepository planRepository)
 {
-    private readonly ITenantRepository _tenantRepository;
-    private readonly IPlanRepository _planRepository;
-
-    public TenantService(ITenantRepository tenantRepository,IPlanRepository planRepository)
-    {
-        _tenantRepository = tenantRepository;
-        _planRepository = planRepository;
-    }
+    private readonly ITenantRepository _tenantRepository = tenantRepository;
+    private readonly IPlanRepository _planRepository = planRepository;
 
     public async Task<TenantResponseDto> CreateAsync(CreateTenantDto dto)
     {

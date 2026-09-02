@@ -9,27 +9,14 @@ using TenantDesk.Domain.Enums;
 
 namespace TenantDesk.Infrastructure.Identity;
 
-public class AuthService : IAuthService
+public class AuthService(
+    IUserRepository userRepository,
+    ITenantRepository _tenantRepository,
+    ITokenService _tokenService,
+    IPasswordHasher<User> _passwordHasher,
+    IUnitOfWork _unitOfWork) : IAuthService
 {
-    private readonly IUserRepository _userRepository;
-    private readonly ITenantRepository _tenantRepository;
-    private readonly ITokenService _tokenService;
-    private readonly IPasswordHasher<User> _passwordHasher;
-    private readonly IUnitOfWork _unitOfWork;
-
-    public AuthService(
-        IUserRepository userRepository,
-        ITenantRepository tenantRepository,
-        ITokenService tokenService,
-        IPasswordHasher<User> passwordHasher,
-        IUnitOfWork unitOfWork)
-    {
-        _userRepository = userRepository;
-        _tenantRepository = tenantRepository;
-        _tokenService = tokenService;
-        _passwordHasher = passwordHasher;
-        _unitOfWork = unitOfWork;
-    }
+    
 
     public async Task<AuthResponseDto> RegisterAsync(RegisterDto dto)
     {
@@ -43,7 +30,7 @@ public class AuthService : IAuthService
         //    uniqueness means the same email CAN exist in different tenants,
         //    but not twice in the same one — that's exactly what
         //    ExistsByEmailAsync(tenantId, email) checks.
-        var emailTaken = await _userRepository.ExistsByEmailAsync(tenant.TenantId, dto.Email.Trim().ToLower());
+        var emailTaken = await userRepository.ExistsByEmailAsync(tenant.TenantId, dto.Email.Trim().ToLower());
         if (emailTaken)
             throw new InvalidOperationException("A user with this email already exists in this tenant.");
 
@@ -59,7 +46,7 @@ public class AuthService : IAuthService
         //    DbContext; the actual SQL INSERT + commit happens in
         //    _unitOfWork.SaveChangesAsync() — this is the pattern your
         //    UnitOfWork class already uses everywhere else in the project.
-        await _userRepository.AddAsync(user);
+        await userRepository.AddAsync(user);
         await _unitOfWork.SaveChangesAsync();
 
         // 5. Issue a token immediately so the user is logged in right after
@@ -78,7 +65,7 @@ public class AuthService : IAuthService
         // Tenant-scoped lookup: finds the user only if they belong to THIS
         // tenant, so there's no ambiguity if the same email exists under a
         // different tenant.
-        var user = await _userRepository.GetByEmailAsync(dto.Email.Trim().ToLower(), tenant.TenantId)
+        var user = await userRepository.GetByEmailAsync(dto.Email.Trim().ToLower(), tenant.TenantId)
             ?? throw new UnauthorizedAccessException("Invalid credentials.");
 
         // Note: we deliberately throw the SAME generic "Invalid credentials"

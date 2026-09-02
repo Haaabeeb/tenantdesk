@@ -7,14 +7,9 @@ namespace TenantDesk.Api.Controllers;
 
 [ApiController]
 [Route("api/plans")]
-public class PlansController : ControllerBase
+public class PlansController(PlanService planService) : ControllerBase
 {
-    private readonly PlanService _planService;
-
-    public PlansController(PlanService planService)
-    {
-        _planService = planService;
-    }
+    private readonly PlanService _planService = planService;
 
     // POST: api/plans
     [HttpPost]

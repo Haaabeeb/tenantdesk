@@ -3,11 +3,9 @@ using TenantDesk.Application.Interfaces.Identity;
 
 namespace TenantDesk.Infrastructure.Services;
 
-public class CurrentTenantService : ICurrentTenantService
+public class CurrentTenantService(IHttpContextAccessor accessor) : ICurrentTenantService
 {
-    private readonly IHttpContextAccessor _accessor;
-
-    public CurrentTenantService(IHttpContextAccessor accessor) => _accessor = accessor;
+    private readonly IHttpContextAccessor _accessor = accessor;
 
     public Guid GetTenantId()
     {

@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.IdentityModel.Tokens;
 using TenantDesk.Domain.Entities;
 using System.Text;
+using TenantDesk.Application.Mapping;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -29,7 +30,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         ServerVersion.AutoDetect(connectionString)
     )
 );
-
+builder.Services.AddAutoMapper(typeof(UserMappingProfile));
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 
 // --- from development: Plan + Tenant (Phase 2) ---
@@ -65,8 +66,8 @@ builder.Services.AddAuthorization();
 // --- end JWT Authentication setup ---
 
 // --- Application services (Phase 3: Auth + User) ---
-//builder.Services.AddScoped<IUserRepository, UserRepository>();
-//builder.Services.AddScoped<UserService>();
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddScoped<UserService>();
 builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
 builder.Services.AddScoped<ICurrentTenantService, CurrentTenantService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
