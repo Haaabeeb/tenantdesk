@@ -5,6 +5,7 @@ using TenantDesk.Application.Interfaces;
 using TenantDesk.Application.Services;
 using TenantDesk.Infrastructure.Repositories;
 using TenantDesk.Api.Middleware;
+using TenantDesk.Application.Mapping;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,15 +23,15 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     )
 );
 
-builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+builder.Services.AddAutoMapper(typeof(UserMappingProfile).Assembly);
 
+builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 
 builder.Services.AddScoped<IPlanRepository, PlanRepository>();
 builder.Services.AddScoped<PlanService>();
 
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<TenantService>();
-
 
 builder.Services.AddHttpContextAccessor();
 

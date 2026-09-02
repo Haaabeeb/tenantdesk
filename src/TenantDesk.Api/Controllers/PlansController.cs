@@ -1,4 +1,3 @@
-
 using Microsoft.AspNetCore.Mvc;
 using TenantDesk.Application.Services;
 using TenantDesk.Application.Dto.Plan;
@@ -18,38 +17,54 @@ public class PlansController : ControllerBase
 
     // POST: api/plans
     [HttpPost]
-    public async Task<IActionResult> CreatePlan(CreatePlanDto dto)=>
-        Ok(await _planService.CreateAsync(dto));
+    public async Task<IActionResult> CreatePlan(CreatePlanDto dto)
+    {
+        var plan = await _planService.CreateAsync(dto);
 
-    
+        return CreatedAtAction(
+            nameof(GetPlanById),
+            new { planId = plan.PlanId },
+            plan);
+    }
+
     // GET: api/plans/{planId}
     [HttpGet("{planId}")]
-    public async Task<IActionResult> GetPlanById(Guid planId) => 
-        Ok(await _planService.GetByIdAsync(planId));
-    
+    public async Task<IActionResult> GetPlanById(Guid planId)
+    {
+        var plan = await _planService.GetByIdAsync(planId);
+
+        return Ok(plan);
+    }
+
     // GET: api/plans
     [HttpGet]
-    public async Task<IActionResult> GetAllPlans() => 
-        Ok(await _planService.GetAllAsync());
+    public async Task<IActionResult> GetAllPlans()
+    {
+        var plans = await _planService.GetAllAsync();
+
+        return Ok(plans);
+    }
 
     // PUT: api/plans/{planId}/rate-limit
     [HttpPut("{planId}/rate-limit")]
-    public async Task<IActionResult> ChangeRateLimit(Guid planId, ChangePlanRateLimitDto dto) =>
-        Ok(await _planService.ChangeRateLimitAsync(planId, dto));
+    public async Task<IActionResult> ChangeRateLimit(
+        Guid planId,
+        ChangePlanRateLimitDto dto)
+    {
+        await _planService.ChangeRateLimitAsync(planId, dto);
 
+        return NoContent();
+    }
 
     // DELETE: api/plans/{id}
     [HttpDelete("{id}")]
     public async Task<IActionResult> Delete(Guid id)
     {
         await _planService.DeleteAsync(id);
+
         return NoContent();
     }
 
 
-
-
-
-   
-
+    
 }

@@ -1,19 +1,15 @@
+using AutoMapper;
 using TenantDesk.Application.Dto.Tenant;
 using TenantDesk.Application.Interfaces;
 using TenantDesk.Domain.Entities;
 
 namespace TenantDesk.Application.Services;
 
-public class TenantService
+public class TenantService(ITenantRepository tenantRepository,IPlanRepository planRepository,IMapper mapper)
 {
-    private readonly ITenantRepository _tenantRepository;
-    private readonly IPlanRepository _planRepository;
-
-    public TenantService(ITenantRepository tenantRepository,IPlanRepository planRepository)
-    {
-        _tenantRepository = tenantRepository;
-        _planRepository = planRepository;
-    }
+    private readonly ITenantRepository _tenantRepository = tenantRepository;
+    private readonly IPlanRepository _planRepository = planRepository;
+    private readonly IMapper _mapper = mapper;
 
     public async Task<TenantResponseDto> CreateAsync(CreateTenantDto dto)
     {
@@ -31,24 +27,24 @@ public class TenantService
 
         await _tenantRepository.AddAsync(tenant);
 
-        return MapToResponseDto(tenant);
+        return _mapper.Map<TenantResponseDto>(tenant);
     }
 
     public async Task<TenantResponseDto?> GetByIdAsync(Guid id)
     {
         var tenant = await _tenantRepository.GetByIdAsync(id);
 
-        if (tenant is null){
+        if (tenant is null)
             throw new KeyNotFoundException($"Tenant with ID '{id}' not found.");
-        }
 
-        return MapToResponseDto(tenant);
+        return _mapper.Map<TenantResponseDto>(tenant);
     }
+
     public async Task<IEnumerable<TenantListDto>> GetAllAsync()
     {
         var tenants = await _tenantRepository.GetAllAsync();
 
-        return tenants.Select(t => new TenantListDto(t.TenantId,t.TenantName,t.Subdomain,t.IsActive));
+        return _mapper.Map<IEnumerable<TenantListDto>>(tenants);
     }
 
     public async Task<TenantResponseDto> UpdateAsync(Guid id,UpdateTenantDto dto)
@@ -58,7 +54,8 @@ public class TenantService
         if (tenant is null)
             throw new KeyNotFoundException("Tenant not found.");
 
-        var normalizedSubdomain = dto.Subdomain.Trim().ToLowerInvariant();
+        var normalizedSubdomain =
+            dto.Subdomain.Trim().ToLowerInvariant();
 
         if (!string.Equals(tenant.Subdomain,normalizedSubdomain,StringComparison.OrdinalIgnoreCase))
         {
@@ -73,7 +70,7 @@ public class TenantService
 
         await _tenantRepository.UpdateAsync(tenant);
 
-        return MapToResponseDto(tenant);
+        return _mapper.Map<TenantResponseDto>(tenant);
     }
 
     public async Task ChangePlanAsync(Guid id,ChangeTenantPlanDto dto)
@@ -116,11 +113,5 @@ public class TenantService
             throw new KeyNotFoundException("Tenant not found.");
 
         await _tenantRepository.DeleteAsync(id);
-    }
-
-    private static TenantResponseDto MapToResponseDto(Tenant tenant)
-    {
-        return new TenantResponseDto(tenant.TenantId,tenant.PlanId,tenant.TenantName,tenant.Subdomain,
-            tenant.IsActive,tenant.CreatedAt,tenant.UpdatedAt);
     }
 }
