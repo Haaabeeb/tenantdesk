@@ -51,6 +51,9 @@ builder.Services.AddScoped<BusinessHourService>();
 builder.Services.AddScoped<IDateTimeProvider, DateTimeProvider>();
 builder.Services.AddScoped<ISlaCalculatorService, SlaCalculatorService>();
 
+builder.Services.AddScoped<INotificationRepository, NotificationRepository>();
+builder.Services.AddScoped<INotificationDispatcher, NotificationDispatcher>();
+builder.Services.AddScoped<IEmailService, EmailService>();
 
 
 builder.Services.AddHttpContextAccessor();
