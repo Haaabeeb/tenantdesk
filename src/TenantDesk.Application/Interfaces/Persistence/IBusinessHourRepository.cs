@@ -7,6 +7,7 @@ public interface IBusinessHourRepository
 {
     Task<IEnumerable<BusinessHour>> GetByTenantAsync(Guid tenantId);
     Task<BusinessHour?> GetByDayAsync(Guid tenantId, DayOfWeek day);
+    Task<BusinessHour?> GetByIdAsync(Guid id);
     Task<bool> IsWithinBusinessHoursAsync(Guid tenantId, DateTime time);
     Task AddAsync(BusinessHour hour);
     Task UpdateAsync(BusinessHour hour);
