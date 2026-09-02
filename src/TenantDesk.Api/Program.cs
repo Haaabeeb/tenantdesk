@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using TenantDesk.Application.Common.Interfaces;
 using TenantDesk.Application.Interfaces;
 using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Services;
 using TenantDesk.Infrastructure.Data;
 using TenantDesk.Application.Services;
 using TenantDesk.Infrastructure.Repositories;
@@ -39,6 +40,18 @@ builder.Services.AddScoped<PlanService>();
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<TenantService>();
 // --- end Phase 2 ---
+
+
+builder.Services.AddScoped<ISlaRepository, SlaRepository>();
+builder.Services.AddScoped<SlaService>();
+
+builder.Services.AddScoped<IBusinessHourRepository, BusinessHourRepository>();
+builder.Services.AddScoped<BusinessHourService>();
+
+builder.Services.AddScoped<IDateTimeProvider, DateTimeProvider>();
+builder.Services.AddScoped<ISlaCalculatorService, SlaCalculatorService>();
+
+
 
 builder.Services.AddHttpContextAccessor();
 
