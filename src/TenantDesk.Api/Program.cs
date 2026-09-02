@@ -42,6 +42,9 @@ builder.Services.AddScoped<TenantService>();
 
 builder.Services.AddHttpContextAccessor();
 
+builder.Services.AddScoped<ICategoryRepository, CategoryRepository>();   
+builder.Services.AddScoped<CategoryService>();                            
+
 // --- JWT Authentication setup ---
 var jwtSection = builder.Configuration.GetSection("Jwt");
 var jwtKey = jwtSection["Key"]!;
