@@ -30,7 +30,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         ServerVersion.AutoDetect(connectionString)
     )
 );
-builder.Services.AddAutoMapper(typeof(UserMappingProfile));
+builder.Services.AddAutoMapper(typeof(UserMappingProfile).Assembly);
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 
 // --- from development: Plan + Tenant (Phase 2) ---

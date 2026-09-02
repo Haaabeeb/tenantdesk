@@ -1,13 +1,15 @@
 
+using AutoMapper;
 using TenantDesk.Application.Dto.Plan;
 using TenantDesk.Application.Interfaces;
 using TenantDesk.Domain.Entities;
 
 namespace TenantDesk.Application.Services;
 
-public class PlanService(IPlanRepository repository)
+public class PlanService(IPlanRepository repository,IMapper mapper)
 {
     private readonly IPlanRepository _repository = repository;
+    private readonly IMapper _mapper = mapper;
 
     public async Task<PlanResponseDto> CreateAsync(CreatePlanDto dto)
     {
@@ -19,14 +21,13 @@ public class PlanService(IPlanRepository repository)
         }
 
         var plan = new Plan(dto.Name, dto.RateLimitPerMinute);
-        
+
         await _repository.AddAsync(plan);
 
-        return new PlanResponseDto(plan.PlanId, plan.Name, plan.RateLimitPerMinute, plan.CreatedAt);
-
+        return _mapper.Map<PlanResponseDto>(plan);
     }
 
-    public async Task<PlanResponseDto> ChangeRateLimitAsync(Guid planId, ChangePlanRateLimitDto dto)
+    public async Task<PlanResponseDto> ChangeRateLimitAsync(Guid planId,ChangePlanRateLimitDto dto)
     {
         var plan = await _repository.GetByIdAsync(planId);
 
@@ -36,10 +37,10 @@ public class PlanService(IPlanRepository repository)
         }
 
         plan.ChangeRateLimit(dto.RateLimitPerMinute);
-       
+
         await _repository.UpdateAsync(plan);
 
-        return new PlanResponseDto(plan.PlanId, plan.Name, plan.RateLimitPerMinute, plan.CreatedAt);
+        return _mapper.Map<PlanResponseDto>(plan);
     }
 
     public async Task DeleteAsync(Guid planId)
@@ -58,7 +59,7 @@ public class PlanService(IPlanRepository repository)
     {
         var plans = await _repository.GetAllAsync();
 
-        return plans.Select(plan => new PlanResponseDto(plan.PlanId, plan.Name, plan.RateLimitPerMinute, plan.CreatedAt));
+        return _mapper.Map<IEnumerable<PlanResponseDto>>(plans);
     }
 
     public async Task<PlanResponseDto> GetByIdAsync(Guid planId)
@@ -70,7 +71,7 @@ public class PlanService(IPlanRepository repository)
             throw new KeyNotFoundException($"Plan with ID '{planId}' not found.");
         }
 
-        return new PlanResponseDto(plan.PlanId, plan.Name, plan.RateLimitPerMinute, plan.CreatedAt);
+        return _mapper.Map<PlanResponseDto>(plan);
     }
 
     public async Task<PlanResponseDto> GetByNameAsync(string name)
@@ -82,26 +83,6 @@ public class PlanService(IPlanRepository repository)
             throw new KeyNotFoundException($"Plan with name '{name}' not found.");
         }
 
-        return new PlanResponseDto(plan.PlanId, plan.Name, plan.RateLimitPerMinute, plan.CreatedAt);
+        return _mapper.Map<PlanResponseDto>(plan);
     }
-
-
-
-
-
-         
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }

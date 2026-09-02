@@ -14,23 +14,9 @@ public class TenantsController(TenantService tenantService) : ControllerBase
     [HttpPost]
     public async Task<ActionResult<TenantResponseDto>> Create(CreateTenantDto dto)
     {
-        try
-        {
-            var tenant = await _tenantService.CreateAsync(dto);
+        var tenant = await _tenantService.CreateAsync(dto);
 
-            return CreatedAtAction(
-                nameof(GetById),
-                new { id = tenant.TenantId },
-                tenant);
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return Conflict(ex.Message);
-        }
+        return CreatedAtAction(nameof(GetById),new { id = tenant.TenantId },tenant);
     }
 
     // GET: api/tenants
@@ -48,9 +34,6 @@ public class TenantsController(TenantService tenantService) : ControllerBase
     {
         var tenant = await _tenantService.GetByIdAsync(id);
 
-        if (tenant is null)
-            return NotFound();
-
         return Ok(tenant);
     }
 
@@ -60,72 +43,38 @@ public class TenantsController(TenantService tenantService) : ControllerBase
         Guid id,
         UpdateTenantDto dto)
     {
-        try
-        {
-            var tenant = await _tenantService.UpdateAsync(id, dto);
+        var tenant = await _tenantService.UpdateAsync(id, dto);
 
-            return Ok(tenant);
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return Conflict(ex.Message);
-        }
+        return Ok(tenant);
     }
 
     // PUT: api/tenants/{id}/status
     [HttpPut("{id:guid}/status")]
-    public async Task<IActionResult> ChangeStatus(
-        Guid id,
-        ChangeTenantStatusDto dto)
+    public async Task<IActionResult> ChangeStatus( Guid id,ChangeTenantStatusDto dto)
     {
-        try
-        {
-            await _tenantService.ChangeStatusAsync(id, dto);
+        await _tenantService.ChangeStatusAsync(id, dto);
 
-            return NoContent();
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
+        return NoContent();
     }
 
     // PUT: api/tenants/{id}/plan
     [HttpPut("{id:guid}/plan")]
-    public async Task<IActionResult> ChangePlan(
-        Guid id,
-        ChangeTenantPlanDto dto)
+    public async Task<IActionResult> ChangePlan(Guid id,ChangeTenantPlanDto dto)
     {
-        try
-        {
-            await _tenantService.ChangePlanAsync(id, dto);
+        await _tenantService.ChangePlanAsync(id, dto);
 
-            return NoContent();
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
+        return NoContent();
     }
 
     // DELETE: api/tenants/{id}
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {
-        try
-        {
-            await _tenantService.DeleteAsync(id);
+        await _tenantService.DeleteAsync(id);
 
-            return NoContent();
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
+        return NoContent();
     }
+
+
 }
 
