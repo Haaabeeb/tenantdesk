@@ -5,11 +5,9 @@ using TenantDesk.Domain.Enums;
 
 namespace TenantDesk.Infrastructure.Services;
 
-public class CurrentUserService : ICurrentUserService
+public class CurrentUserService(IHttpContextAccessor accessor) : ICurrentUserService
 {
-    private readonly IHttpContextAccessor _accessor;
-
-    public CurrentUserService(IHttpContextAccessor accessor) => _accessor = accessor;
+    private readonly IHttpContextAccessor _accessor = accessor;
 
     public Guid GetUserId()
     {

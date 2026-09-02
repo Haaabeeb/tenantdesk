@@ -5,14 +5,9 @@ using TenantDesk.Infrastructure.Data;
 
 namespace TenantDesk.Infrastructure.Repositories;
 
-public class TenantRepository : ITenantRepository
+public class TenantRepository(AppDbContext context) : ITenantRepository
 {
-    private readonly AppDbContext _context;
-
-    public TenantRepository(AppDbContext context)
-    {
-        _context = context;
-    }
+    private readonly AppDbContext _context = context;
 
     public Task<Tenant?> GetByIdAsync(Guid id) =>
         _context.Tenants.FirstOrDefaultAsync(t => t.TenantId == id);

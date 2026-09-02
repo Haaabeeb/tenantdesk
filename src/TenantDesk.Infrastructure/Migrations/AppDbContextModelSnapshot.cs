@@ -406,6 +406,10 @@ namespace TenantDesk.Infrastructure.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("varchar(200)");
 
+                    b.Property<string>("PasswordHash")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
                     b.Property<int>("Role")
                         .HasColumnType("int");
 

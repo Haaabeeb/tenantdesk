@@ -8,13 +8,11 @@ using TenantDesk.Domain.Entities;
 
 namespace TenantDesk.Infrastructure.Identity;
 
-public class TokenService : ITokenService
+public class TokenService(IConfiguration config) : ITokenService
 {
-    private readonly IConfiguration _config;
+    private readonly IConfiguration _config = config;
 
-    public TokenService(IConfiguration config) => _config = config;
-
-public string TokenGenerateToken(User user)    {
+    public string TokenGenerateToken(User user)    {
         var jwtSection = _config.GetSection("Jwt");
 
         

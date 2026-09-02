@@ -3,12 +3,10 @@ using Microsoft.EntityFrameworkCore.Storage;
 
 namespace TenantDesk.Infrastructure.Data;
 
-public class UnitOfWork : IUnitOfWork
+public class UnitOfWork(AppDbContext context) : IUnitOfWork
 {
-    private readonly AppDbContext _context;
+    private readonly AppDbContext _context = context;
     private IDbContextTransaction? _transaction;
-
-    public UnitOfWork(AppDbContext context) => _context = context;
 
     public Task<int> SaveChangesAsync() => _context.SaveChangesAsync();
 
