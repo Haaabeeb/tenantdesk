@@ -4,22 +4,11 @@ using TenantDesk.Domain.Entities;
 
 namespace TenantDesk.Application.Services;
 
-public class SlaCalculatorService : ISlaCalculatorService
+public class SlaCalculatorService(ITicketRepository _ticketRepository, ISlaRepository _slaRepository, IBusinessHourRepository _businessHourRepository, IDateTimeProvider _dateTimeProvider) : ISlaCalculatorService
 {
-    private readonly ITicketRepository _ticketRepository;
-    private readonly ISlaRepository _slaRepository;
-    private readonly IBusinessHourRepository _businessHourRepository;
-    private readonly IDateTimeProvider _dateTimeProvider;
+    
 
     private const int MaxDaySearchWindow = 365;
-
-    public SlaCalculatorService(ITicketRepository ticketRepository,ISlaRepository slaRepository,IBusinessHourRepository businessHourRepository,IDateTimeProvider dateTimeProvider)
-    {
-        _ticketRepository = ticketRepository;
-        _slaRepository = slaRepository;
-        _businessHourRepository = businessHourRepository;
-        _dateTimeProvider = dateTimeProvider;
-    }
 
     public async Task<DateTime> CalculateResponseDueAsync(Guid ticketId)
     {

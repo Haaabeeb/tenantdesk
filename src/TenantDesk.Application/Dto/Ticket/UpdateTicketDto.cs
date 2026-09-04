@@ -1,9 +1,7 @@
 namespace TenantDesk.Application.Dto.Ticket;
 
-// Used with: PUT /api/tickets/{ticketId}
+// Used with: PUT /api/tickets/{id}
 public record UpdateTicketDto(
     string Title,
-    string? Description,
-    TicketStatus Status,
-    Guid? AssignedTo
+    string? Description
 );

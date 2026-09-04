@@ -1,4 +1,4 @@
-    using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using TenantDesk.Domain.Entities;
 
@@ -38,7 +38,7 @@ public class TicketConfiguration : IEntityTypeConfiguration<Ticket>
             .HasForeignKey(t => t.CategoryId)
             .OnDelete(DeleteBehavior.Restrict);
 
-        builder.HasOne<Sla>()
+        builder.HasOne(t => t.Sla)
             .WithMany()
             .HasForeignKey(t => t.SlaId)
             .OnDelete(DeleteBehavior.Restrict);

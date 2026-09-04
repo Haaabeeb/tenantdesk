@@ -14,7 +14,7 @@ public interface ITicketRepository
     Task<int> CountByStatusAsync(Guid tenantId, TicketStatus status);
     public Task<int> CountAssignedToUserAsync(Guid userId);
     public Task<int> CountByTenantAsync(Guid tenantId);
-    public Task <Ticket> AddAsync(Ticket ticket);
+    public  Task AddAsync(Ticket ticket);
     public Task UpdateAsync(Ticket ticket);
     public Task DeleteAsync(Guid id);
     public Task<bool> ExistsAsync(Guid id);

@@ -120,6 +120,7 @@ public interface IBusinessHourRepository
 {
     Task<IEnumerable<BusinessHour>> GetByTenantAsync(Guid tenantId);
     Task<BusinessHour?> GetByDayAsync(Guid tenantId, DayOfWeek day);
+    Task<BusinessHour?> GetByIdAsync(Guid id);
     Task<bool> IsWithinBusinessHoursAsync(Guid tenantId, DateTime time);
     Task AddAsync(BusinessHour hour);
     Task UpdateAsync(BusinessHour hour);
@@ -321,7 +322,7 @@ public interface ITicketRepository
     Task<int> CountByStatusAsync(Guid tenantId, TicketStatus status);
     public Task<int> CountAssignedToUserAsync(Guid userId);
     public Task<int> CountByTenantAsync(Guid tenantId);
-    public Task <Ticket> AddAsync(Ticket ticket);
+    public  Task AddAsync(Ticket ticket);
     public Task UpdateAsync(Ticket ticket);
     public Task DeleteAsync(Guid id);
     public Task<bool> ExistsAsync(Guid id);
@@ -368,23 +369,528 @@ public class Class1
 {
 
 }
-===== ./TenantDesk.Application/Services/TenantService.cs =====
+===== ./TenantDesk.Application/Services/SlaCalculatorService.cs =====
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Services;
+
+public class SlaCalculatorService(ITicketRepository _ticketRepository, ISlaRepository _slaRepository, IBusinessHourRepository _businessHourRepository, IDateTimeProvider _dateTimeProvider) : ISlaCalculatorService
+{
+    
+
+    private const int MaxDaySearchWindow = 365;
+
+    public async Task<DateTime> CalculateResponseDueAsync(Guid ticketId)
+    {
+        var ticket = await GetTicketOrThrowAsync(ticketId);
+        var sla = await GetSlaOrThrowAsync(ticket);
+
+        return await CalculateDueDateAsync(ticket, sla.ResponseTime);
+    }
+
+    public async Task<DateTime> CalculateResolutionDueAsync(Guid ticketId)
+    {
+        var ticket = await GetTicketOrThrowAsync(ticketId);
+        return await CalculateResolutionDueInternalAsync(ticket);
+    }
+
+    public async Task<bool> IsBreachedAsync(Guid ticketId)
+    {
+        var ticket = await GetTicketOrThrowAsync(ticketId);
+        var resolutionDue = await CalculateResolutionDueInternalAsync(ticket);
+
+        var comparisonTime = ticket.Status == TicketStatus.Closed
+            ? ticket.UpdatedAt
+            : _dateTimeProvider.UtcNow;
+
+        return comparisonTime > resolutionDue;
+    }
+
+    private async Task<DateTime> CalculateResolutionDueInternalAsync(Ticket ticket)
+    {
+        var sla = await GetSlaOrThrowAsync(ticket);
+        return await CalculateDueDateAsync(ticket, sla.ResolutionTime);
+    }
+
+    private async Task<DateTime> CalculateDueDateAsync(Ticket ticket, int minutesToAllocate)
+    {
+        var businessHours = await _businessHourRepository.GetByTenantAsync(ticket.TenantId);
+
+        var workingDaysMap = businessHours
+            .Where(b => b.IsWorkingDay)
+            .ToDictionary(b => b.DayOfWeek);
+
+        if (workingDaysMap.Count == 0)
+            return ticket.CreatedAt.AddMinutes(minutesToAllocate);
+
+        var currentPointer = ticket.CreatedAt;
+        var remainingTime = TimeSpan.FromMinutes(minutesToAllocate);
+
+        for (var i = 0; i < MaxDaySearchWindow; i++)
+        {
+            if (!workingDaysMap.TryGetValue(currentPointer.DayOfWeek, out var todayHours))
+            {
+                currentPointer = currentPointer.Date.AddDays(1);
+                continue;
+            }
+
+            var openTime = todayHours.OpenTime!.Value.ToTimeSpan();
+            var closeTime = todayHours.CloseTime!.Value.ToTimeSpan();
+            var currentTimeOfDay = currentPointer.TimeOfDay;
+
+            if (currentTimeOfDay < openTime)
+            {
+                currentPointer = currentPointer.Date.Add(openTime);
+                currentTimeOfDay = openTime;
+            }
+
+            if (currentTimeOfDay >= closeTime)
+            {
+                currentPointer = currentPointer.Date.AddDays(1);
+                continue;
+            }
+
+            var availableTimeToday = closeTime - currentTimeOfDay;
+
+            if (remainingTime <= availableTimeToday)
+                return currentPointer.Add(remainingTime);
+
+            remainingTime -= availableTimeToday;
+            currentPointer = currentPointer.Date.AddDays(1);
+        }
+
+        throw new InvalidOperationException("Could not calculate SLA due date within the maximum search window (365 days). Check the tenant's business hour configuration.");
+    }
+
+    private async Task<Ticket> GetTicketOrThrowAsync(Guid ticketId)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(ticketId);
+        if (ticket is null)
+            throw new KeyNotFoundException($"Ticket '{ticketId}' not found.");
+
+        return ticket;
+    }
+
+    private async Task<Sla> GetSlaOrThrowAsync(Ticket ticket)
+    {
+        var sla = await _slaRepository.GetByIdAsync(ticket.SlaId);
+        if (sla is null)
+            throw new KeyNotFoundException($"SLA '{ticket.SlaId}' referenced by ticket '{ticket.TicketId}' was not found.");
+
+        return sla;
+    }
+    
+
+
+}===== ./TenantDesk.Application/Services/SlaService.cs =====
+using System.Diagnostics.CodeAnalysis;
+using AutoMapper;
+using TenantDesk.Application.Dto.Sla;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class SlaService
+{
+    private readonly ISlaRepository _slaRepository;
+    private readonly ICurrentTenantService _currentTenantService;
+    private readonly IMapper _mapper;
+
+    public SlaService(ISlaRepository slaRepository,ICurrentTenantService currentTenantService,IMapper mapper)
+    {
+        _slaRepository = slaRepository;
+        _currentTenantService = currentTenantService;
+        _mapper = mapper;
+    }
+
+    public async Task<SlaResponseDto> CreateAsync(CreateSlaDto dto)
+    {
+        if (dto.ResponseTime > dto.ResolutionTime)
+            throw new ArgumentException("Response time cannot be greater than resolution time.");
+
+        var tenantId = _currentTenantService.GetTenantId();
+
+        var existing = await _slaRepository.GetByTenantAndPriorityAsync(tenantId, dto.Priority);
+        if (existing is not null)
+            throw new InvalidOperationException($"An SLA for priority '{dto.Priority}' already exists for this tenant.");
+
+        var sla = new Sla(tenantId, dto.Priority, dto.ResponseTime, dto.ResolutionTime);
+        await _slaRepository.AddAsync(sla);
+
+        return _mapper.Map<SlaResponseDto>(sla);
+    }
+
+    public async Task<SlaResponseDto> GetByIdAsync(Guid id)
+    {
+        var sla = await _slaRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(sla);
+
+        return _mapper.Map<SlaResponseDto>(sla);
+    }
+
+    public async Task<SlaResponseDto> GetByPriorityAsync(PriorityLevel priority)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+       
+        var sla = await _slaRepository.GetByTenantAndPriorityAsync(tenantId, priority);
+
+        if (sla == null){
+            throw new KeyNotFoundException($"No SLA configured for priority '{priority}'.");
+        }
+
+        return _mapper.Map<SlaResponseDto>(sla);
+    }
+
+    public async Task<IEnumerable<SlaResponseDto>> GetAllAsync()
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var slas = await _slaRepository.GetAllByTenantAsync(tenantId);
+
+        return _mapper.Map<IEnumerable<SlaResponseDto>>(slas);
+    }
+
+    public async Task<SlaResponseDto> UpdateAsync(Guid id, UpdateSlaTimesDto dto)
+    {
+        if (dto.ResponseTime > dto.ResolutionTime)
+            throw new ArgumentException("Response time cannot be greater than resolution time.");
+
+        var sla = await _slaRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(sla);
+
+        sla.UpdateTimes(dto.ResponseTime, dto.ResolutionTime);
+        await _slaRepository.UpdateAsync(sla);
+
+        return _mapper.Map<SlaResponseDto>(sla);
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var sla = await _slaRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(sla);
+
+        await _slaRepository.DeleteAsync(id);
+    }
+
+    private void EnsureExistsAndOwned([NotNull] Sla? sla)
+    {
+        if (sla is null)
+            throw new KeyNotFoundException("SLA not found.");
+
+        if (sla.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access resources belonging to another tenant.");
+    }
+
+
+}===== ./TenantDesk.Application/Services/NotificationDispatcher.cs =====
+
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class NotificationDispatcher(INotificationRepository notificationRepository,ICurrentTenantService currentTenantService) : INotificationDispatcher
+{
+    private readonly INotificationRepository _notificationRepository = notificationRepository;
+    private readonly ICurrentTenantService _currentTenantService = currentTenantService;
+
+    public async Task DispatchAsync(Guid userId, NotificationType type, string message, Guid? ticketId)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        
+        var notification = new Notification(
+            tenantId: tenantId,
+            userId: userId,
+            type: type,
+            message: message,
+            ticketId: ticketId);
+
+        await _notificationRepository.AddAsync(notification);
+    }
+}===== ./TenantDesk.Application/Services/UserService.cs =====
+using AutoMapper;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.User;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Services;
+
+public class UserService(IUserRepository _userRepository, ICurrentTenantService _currentTenantService,IMapper _mapper)
+{
+    
+
+    
+    public async Task<UserResponseDto> GetByIdAsync(Guid id)
+    {
+        var user = await _userRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"User with ID '{id}' not found.");
+
+        // tenant scoping: ما بنسمح تشوف مستخدم tenant تاني
+        if (user.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access users from another tenant.");
+
+        return _mapper.Map<UserResponseDto>(user);
+    }
+
+    public async Task<PagedResult<UserResponseDto>> GetFilteredAsync(UserFilter filter)
+    {
+        // tenant scoping: بنفرض TenantId المستخدم الحالي، مش يلي المستخدم بعته بالـ query
+        filter.TenantId = _currentTenantService.GetTenantId();
+
+        var result = await _userRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<UserResponseDto>
+        {
+            Items = result.Items.Select(MapToResponseDto).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<UserResponseDto> UpdateAsync(Guid id, UpdateUserDto dto)
+    {
+        var user = await _userRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"User with ID '{id}' not found.");
+
+        if (user.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot modify users from another tenant.");
+
+        var normalizedEmail = dto.Email.Trim().ToLower();
+
+        if (!string.Equals(user.Email, normalizedEmail, StringComparison.OrdinalIgnoreCase))
+        {
+            var emailTaken = await _userRepository.ExistsByEmailAsync(user.TenantId, normalizedEmail);
+            if (emailTaken)
+                throw new InvalidOperationException("A user with this email already exists in this tenant.");
+        }
+
+        user.ChangeEmail(normalizedEmail);
+        user.ChangeRole(dto.Role);
+
+        await _userRepository.UpdateAsync(user);
+
+        return _mapper.Map<UserResponseDto>(user);
+    }
+
+    public async Task ChangeStatusAsync(Guid id, ChangeUserStatusDto dto)
+    {
+        var user = await _userRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"User with ID '{id}' not found.");
+
+        if (user.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot modify users from another tenant.");
+
+        if (dto.IsActive)
+            user.Activate();
+        else
+            user.Deactivate();
+
+        await _userRepository.UpdateAsync(user);
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var user = await _userRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"User with ID '{id}' not found.");
+
+        if (user.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot delete users from another tenant.");
+
+        await _userRepository.DeleteAsync(id);
+    }
+
+    private static UserResponseDto MapToResponseDto(User user)
+    {
+        return new UserResponseDto(
+            user.UserId,
+            user.TenantId,
+            user.Email,
+            user.Role,
+            user.IsActive,
+            user.CreatedAt,
+            user.UpdatedAt);
+    }
+}===== ./TenantDesk.Application/Services/Ticketservice.cs =====
+using AutoMapper;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Ticket;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class TicketService(
+    ITicketRepository _ticketRepository,
+    ICategoryRepository _categoryRepository,
+    ISlaRepository _slaRepository,
+    ICurrentTenantService _currentTenantService,
+    ICurrentUserService _currentUserService,
+    INotificationDispatcher _notificationDispatcher,
+    IMapper _mapper)
+{
+    public async Task<TicketResponseDto> CreateAsync(CreateTicketDto dto)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var userId = _currentUserService.GetUserId();
+
+        var category = await _categoryRepository.GetByIdAsync(dto.CategoryId)
+            ?? throw new KeyNotFoundException($"Category with ID '{dto.CategoryId}' not found.");
+
+        if (category.TenantId != tenantId)
+            throw new UnauthorizedAccessException("You cannot use a category from another tenant.");
+
+        var sla = await _slaRepository.GetByIdAsync(dto.SlaId)
+            ?? throw new KeyNotFoundException($"SLA with ID '{dto.SlaId}' not found.");
+
+        if (sla.TenantId != tenantId)
+            throw new UnauthorizedAccessException("You cannot use an SLA from another tenant.");
+
+        var ticket = new Ticket(tenantId, dto.CategoryId, dto.SlaId, userId, dto.Title, dto.Description);
+
+        await _ticketRepository.AddAsync(ticket);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> GetByIdAsync(Guid id)
+    {
+        var ticket = await GetOwnedTicketAsync(id);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<PagedResult<TicketResponseDto>> GetFilteredAsync(TicketFilter filter)
+    {
+        filter.TenantId = _currentTenantService.GetTenantId();
+
+        // Customers only ever see their own tickets, regardless of what they pass in the query.
+        if (_currentUserService.GetUserRole() == UserRole.Customer)
+            filter.CreatedBy = _currentUserService.GetUserId();
+
+        var result = await _ticketRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<TicketResponseDto>
+        {
+            Items = result.Items.Select(t => _mapper.Map<TicketResponseDto>(t)).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<TicketResponseDto> UpdateDetailsAsync(Guid id, UpdateTicketDto dto)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.UpdateDetails(dto.Title, dto.Description);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' was updated.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> ChangeStatusAsync(Guid id, TicketStatus newStatus)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.ChangeStatus(newStatus);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' status changed to {newStatus}.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> AssignAsync(Guid id, Guid assigneeUserId)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.AssignTo(assigneeUserId);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            assigneeUserId, NotificationType.TicketAssigned, $"You have been assigned ticket '{ticket.Title}'.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> CloseAsync(Guid id)
+    {
+        // Agent/Admin can close any ticket assigned to them; a Customer can only close their own.
+        var ticket = await GetOwnedTicketAsync(id);
+
+        ticket.Close();
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' was closed.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    private async Task<Ticket> GetOwnedTicketAsync(Guid id, bool agentOrAdminOnly = false)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Ticket with ID '{id}' not found.");
+
+        if (ticket.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access tickets from another tenant.");
+
+        var role = _currentUserService.GetUserRole();
+        var userId = _currentUserService.GetUserId();
+
+        if (role == UserRole.Customer)
+        {
+            if (ticket.CreatedBy != userId)
+                throw new UnauthorizedAccessException("You cannot access a ticket you did not create.");
+
+            if (agentOrAdminOnly)
+                throw new UnauthorizedAccessException("Only an agent or admin can perform this action.");
+        }
+        else if (role == UserRole.Agent && agentOrAdminOnly)
+        {
+            // Agent can only modify tickets assigned to them; Admin is exempt from this check entirely.
+            if (ticket.AssignedTo != userId)
+                throw new UnauthorizedAccessException("You can only modify tickets assigned to you.");
+        }
+
+        return ticket;
+    }
+}===== ./TenantDesk.Application/Services/TenantService.cs =====
+using AutoMapper;
 using TenantDesk.Application.Dto.Tenant;
 using TenantDesk.Application.Interfaces;
 using TenantDesk.Domain.Entities;
 
 namespace TenantDesk.Application.Services;
 
-public class TenantService
+public class TenantService(ITenantRepository tenantRepository,IPlanRepository planRepository,IMapper mapper)
 {
-    private readonly ITenantRepository _tenantRepository;
-    private readonly IPlanRepository _planRepository;
-
-    public TenantService(ITenantRepository tenantRepository,IPlanRepository planRepository)
-    {
-        _tenantRepository = tenantRepository;
-        _planRepository = planRepository;
-    }
+    private readonly ITenantRepository _tenantRepository = tenantRepository;
+    private readonly IPlanRepository _planRepository = planRepository;
+    private readonly IMapper _mapper = mapper;
 
     public async Task<TenantResponseDto> CreateAsync(CreateTenantDto dto)
     {
@@ -402,24 +908,24 @@ public class TenantService
 
         await _tenantRepository.AddAsync(tenant);
 
-        return MapToResponseDto(tenant);
+        return _mapper.Map<TenantResponseDto>(tenant);
     }
 
     public async Task<TenantResponseDto?> GetByIdAsync(Guid id)
     {
         var tenant = await _tenantRepository.GetByIdAsync(id);
 
-        if (tenant is null){
+        if (tenant is null)
             throw new KeyNotFoundException($"Tenant with ID '{id}' not found.");
-        }
 
-        return MapToResponseDto(tenant);
+        return _mapper.Map<TenantResponseDto>(tenant);
     }
+
     public async Task<IEnumerable<TenantListDto>> GetAllAsync()
     {
         var tenants = await _tenantRepository.GetAllAsync();
 
-        return tenants.Select(t => new TenantListDto(t.TenantId,t.TenantName,t.Subdomain,t.IsActive));
+        return _mapper.Map<IEnumerable<TenantListDto>>(tenants);
     }
 
     public async Task<TenantResponseDto> UpdateAsync(Guid id,UpdateTenantDto dto)
@@ -429,7 +935,8 @@ public class TenantService
         if (tenant is null)
             throw new KeyNotFoundException("Tenant not found.");
 
-        var normalizedSubdomain = dto.Subdomain.Trim().ToLowerInvariant();
+        var normalizedSubdomain =
+            dto.Subdomain.Trim().ToLowerInvariant();
 
         if (!string.Equals(tenant.Subdomain,normalizedSubdomain,StringComparison.OrdinalIgnoreCase))
         {
@@ -444,7 +951,7 @@ public class TenantService
 
         await _tenantRepository.UpdateAsync(tenant);
 
-        return MapToResponseDto(tenant);
+        return _mapper.Map<TenantResponseDto>(tenant);
     }
 
     public async Task ChangePlanAsync(Guid id,ChangeTenantPlanDto dto)
@@ -488,29 +995,115 @@ public class TenantService
 
         await _tenantRepository.DeleteAsync(id);
     }
+}===== ./TenantDesk.Application/Services/BusinessHourService.cs =====
+using System.Diagnostics.CodeAnalysis;
+using AutoMapper;
+using TenantDesk.Application.Dto.BusinessHour;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Domain.Entities;
 
-    private static TenantResponseDto MapToResponseDto(Tenant tenant)
+namespace TenantDesk.Application.Services;
+
+public class BusinessHourService
+{
+    private readonly IBusinessHourRepository _businessHourRepository;
+    private readonly ICurrentTenantService _currentTenantService;
+    private readonly IMapper _mapper;
+
+    public BusinessHourService(IBusinessHourRepository businessHourRepository,ICurrentTenantService currentTenantService,IMapper mapper)
     {
-        return new TenantResponseDto(tenant.TenantId,tenant.PlanId,tenant.TenantName,tenant.Subdomain,
-            tenant.IsActive,tenant.CreatedAt,tenant.UpdatedAt);
+        _businessHourRepository = businessHourRepository;
+        _currentTenantService = currentTenantService;
+        _mapper = mapper;
     }
-}
-===== ./TenantDesk.Application/Services/PlanService.cs =====
 
+    public async Task<BusinessHourResponseDto> CreateAsync(CreateBusinessHourDto dto)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+
+        var existing = await _businessHourRepository.GetByDayAsync(tenantId, dto.DayOfWeek);
+        if (existing is not null)
+            throw new InvalidOperationException($"A business hour record for '{dto.DayOfWeek}' already exists for this tenant.");
+
+        var businessHour = new BusinessHour(tenantId, dto.DayOfWeek, dto.OpenTime, dto.CloseTime);
+        await _businessHourRepository.AddAsync(businessHour);
+
+        return _mapper.Map<BusinessHourResponseDto>(businessHour);
+    }
+
+    public async Task<BusinessHourResponseDto> GetByIdAsync(Guid id)
+    {
+        var businessHour = await _businessHourRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(businessHour);
+
+        return _mapper.Map<BusinessHourResponseDto>(businessHour);
+    }
+
+    public async Task<BusinessHourResponseDto> GetByDayAsync(DayOfWeek day)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var businessHour = await _businessHourRepository.GetByDayAsync(tenantId, day);
+
+        if (businessHour == null)
+        {
+           throw new KeyNotFoundException($"No business hour configured for '{day}'.");
+        }
+        
+        return _mapper.Map<BusinessHourResponseDto>(businessHour);
+    }
+
+    public async Task<IEnumerable<BusinessHourResponseDto>> GetAllAsync()
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var businessHours = await _businessHourRepository.GetByTenantAsync(tenantId);
+
+        return _mapper.Map<IEnumerable<BusinessHourResponseDto>>(businessHours);
+    }
+
+    public async Task<BusinessHourResponseDto> UpdateAsync(Guid id, UpdateBusinessHourDto dto)
+    {
+        var businessHour = await _businessHourRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(businessHour);
+
+        businessHour.UpdateHours(dto.OpenTime, dto.CloseTime);
+        await _businessHourRepository.UpdateAsync(businessHour);
+
+        return _mapper.Map<BusinessHourResponseDto>(businessHour);
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var businessHour = await _businessHourRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(businessHour);
+
+        await _businessHourRepository.DeleteAsync(id);
+    }
+
+    private void EnsureExistsAndOwned([NotNull] BusinessHour? businessHour)
+    {
+        if (businessHour is null)
+            throw new KeyNotFoundException("Business hour record not found.");
+
+        if (businessHour.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access resources belonging to another tenant.");
+    }
+
+
+
+}===== ./TenantDesk.Application/Services/PlanService.cs =====
+
+using AutoMapper;
 using TenantDesk.Application.Dto.Plan;
 using TenantDesk.Application.Interfaces;
 using TenantDesk.Domain.Entities;
 
 namespace TenantDesk.Application.Services;
 
-public class PlanService
+public class PlanService(IPlanRepository repository,IMapper mapper)
 {
-    private readonly IPlanRepository _repository;
-
-    public PlanService(IPlanRepository repository)
-    {
-        _repository = repository;
-    }
+    private readonly IPlanRepository _repository = repository;
+    private readonly IMapper _mapper = mapper;
 
     public async Task<PlanResponseDto> CreateAsync(CreatePlanDto dto)
     {
@@ -522,14 +1115,13 @@ public class PlanService
         }
 
         var plan = new Plan(dto.Name, dto.RateLimitPerMinute);
-        
+
         await _repository.AddAsync(plan);
 
-        return new PlanResponseDto(plan.PlanId, plan.Name, plan.RateLimitPerMinute, plan.CreatedAt);
-
+        return _mapper.Map<PlanResponseDto>(plan);
     }
 
-    public async Task<PlanResponseDto> ChangeRateLimitAsync(Guid planId, ChangePlanRateLimitDto dto)
+    public async Task<PlanResponseDto> ChangeRateLimitAsync(Guid planId,ChangePlanRateLimitDto dto)
     {
         var plan = await _repository.GetByIdAsync(planId);
 
@@ -539,10 +1131,10 @@ public class PlanService
         }
 
         plan.ChangeRateLimit(dto.RateLimitPerMinute);
-       
+
         await _repository.UpdateAsync(plan);
 
-        return new PlanResponseDto(plan.PlanId, plan.Name, plan.RateLimitPerMinute, plan.CreatedAt);
+        return _mapper.Map<PlanResponseDto>(plan);
     }
 
     public async Task DeleteAsync(Guid planId)
@@ -561,7 +1153,7 @@ public class PlanService
     {
         var plans = await _repository.GetAllAsync();
 
-        return plans.Select(plan => new PlanResponseDto(plan.PlanId, plan.Name, plan.RateLimitPerMinute, plan.CreatedAt));
+        return _mapper.Map<IEnumerable<PlanResponseDto>>(plans);
     }
 
     public async Task<PlanResponseDto> GetByIdAsync(Guid planId)
@@ -573,7 +1165,7 @@ public class PlanService
             throw new KeyNotFoundException($"Plan with ID '{planId}' not found.");
         }
 
-        return new PlanResponseDto(plan.PlanId, plan.Name, plan.RateLimitPerMinute, plan.CreatedAt);
+        return _mapper.Map<PlanResponseDto>(plan);
     }
 
     public async Task<PlanResponseDto> GetByNameAsync(string name)
@@ -585,30 +1177,104 @@ public class PlanService
             throw new KeyNotFoundException($"Plan with name '{name}' not found.");
         }
 
-        return new PlanResponseDto(plan.PlanId, plan.Name, plan.RateLimitPerMinute, plan.CreatedAt);
+        return _mapper.Map<PlanResponseDto>(plan);
+    }
+}===== ./TenantDesk.Application/Services/CategoryService.cs =====
+using AutoMapper;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Category;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Services;
+
+public class CategoryService(ICategoryRepository _categoryRepository, ICurrentTenantService _currentTenantService, IMapper _mapper)
+{
+    public async Task<CategoryResponseDto> GetByIdAsync(Guid id)
+    {
+        var category = await _categoryRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Category with ID '{id}' not found.");
+
+        if (category.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access categories from another tenant.");
+
+        return _mapper.Map<CategoryResponseDto>(category);
     }
 
+    public async Task<PagedResult<CategoryResponseDto>> GetFilteredAsync(CategoryFilter filter)
+    {
+        filter.TenantId = _currentTenantService.GetTenantId();
 
+        var result = await _categoryRepository.GetFilteredAsync(filter);
 
+        return new PagedResult<CategoryResponseDto>
+        {
+            Items = result.Items.Select(c => _mapper.Map<CategoryResponseDto>(c)).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
 
+    public async Task<CategoryResponseDto> CreateAsync(CreateCategoryDto dto)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
 
-         
+        var nameTaken = await _categoryRepository.ExistsByNameAsync(tenantId, dto.CategoryName);
+        if (nameTaken)
+            throw new InvalidOperationException("A category with this name already exists in this tenant.");
 
+        var category = new Category(tenantId, dto.CategoryName, dto.Description);
 
+        await _categoryRepository.AddAsync(category);
 
+        return _mapper.Map<CategoryResponseDto>(category);
+    }
 
+    public async Task<CategoryResponseDto> UpdateAsync(Guid id, UpdateCategoryDto dto)
+    {
+        var category = await _categoryRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Category with ID '{id}' not found.");
 
+        if (category.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot modify categories from another tenant.");
 
+        if (!string.Equals(category.CategoryName, dto.CategoryName, StringComparison.OrdinalIgnoreCase))
+        {
+            var nameTaken = await _categoryRepository.ExistsByNameAsync(category.TenantId, dto.CategoryName);
+            if (nameTaken)
+                throw new InvalidOperationException("A category with this name already exists in this tenant.");
+        }
 
+        category.Rename(dto.CategoryName);
+        category.UpdateDescription(dto.Description);
 
+        if (dto.IsActive)
+            category.Activate();
+        else
+            category.Deactivate();
 
+        await _categoryRepository.UpdateAsync(category);
 
+        return _mapper.Map<CategoryResponseDto>(category);
+    }
 
+    public async Task DeleteAsync(Guid id)
+    {
+        var category = await _categoryRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Category with ID '{id}' not found.");
 
+        if (category.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot delete categories from another tenant.");
 
+        var ticketCount = await _categoryRepository.GetTicketCountByCategoryAsync(id);
+        if (ticketCount > 0)
+            throw new InvalidOperationException("Cannot delete a category that still has tickets assigned to it.");
 
-}
-===== ./TenantDesk.Application/Dto/Notification/NotificationResponseDto.cs =====
+        await _categoryRepository.DeleteAsync(id);
+    }
+}===== ./TenantDesk.Application/Dto/Notification/NotificationResponseDto.cs =====
 
 using TenantDesk.Domain.Enums;
 
@@ -751,7 +1417,13 @@ namespace TenantDesk.Application.Dto.Comment;
 public record CreateCommentDto(
     string Content
 );
-===== ./TenantDesk.Application/Dto/Ticket/TicketResponseDto.cs =====
+===== ./TenantDesk.Application/Dto/Ticket/ChangeTicketStatusDto.cs =====
+namespace TenantDesk.Application.Dto.Ticket;
+
+// Used with: PATCH /api/tickets/{id}/status
+public record ChangeTicketStatusDto(
+    TicketStatus Status
+);===== ./TenantDesk.Application/Dto/Ticket/TicketResponseDto.cs =====
 namespace TenantDesk.Application.Dto.Ticket;
 
 // Returned from: GET/POST/PUT /api/tickets
@@ -771,14 +1443,17 @@ public record TicketResponseDto(
 ===== ./TenantDesk.Application/Dto/Ticket/UpdateTicketDto.cs =====
 namespace TenantDesk.Application.Dto.Ticket;
 
-// Used with: PUT /api/tickets/{ticketId}
+// Used with: PUT /api/tickets/{id}
 public record UpdateTicketDto(
     string Title,
-    string? Description,
-    TicketStatus Status,
-    Guid? AssignedTo
-);
-===== ./TenantDesk.Application/Dto/Ticket/CreateTicketDto.cs =====
+    string? Description
+);===== ./TenantDesk.Application/Dto/Ticket/AssignTicketDto.cs =====
+namespace TenantDesk.Application.Dto.Ticket;
+
+// Used with: PATCH /api/tickets/{id}/assign
+public record AssignTicketDto(
+    Guid AssignedTo
+);===== ./TenantDesk.Application/Dto/Ticket/CreateTicketDto.cs =====
 namespace TenantDesk.Application.Dto.Ticket;
 
 // Used with: POST /api/tickets
@@ -821,17 +1496,6 @@ namespace TenantDesk.Application.Dto.User;
 
 // PUT /api/users/{userId}
 public record UpdateUserDto(
-    string Email,
-    UserRole Role
-);
-===== ./TenantDesk.Application/Dto/User/CreateUserDto.cs =====
-
-using TenantDesk.Domain.Enums;
-
-namespace TenantDesk.Application.Dto.User;
-
-// Sent to: POST /api/tenants/{tenantId}/users
-public record CreateUserDto(
     string Email,
     UserRole Role
 );
@@ -994,7 +1658,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TenantDesk.Application")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c26a1d23fb9c031a70cb453a398f2dd48b9ee440")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5268552214368fa453b191d4118c845114b9bda9")]
 [assembly: System.Reflection.AssemblyProductAttribute("TenantDesk.Application")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TenantDesk.Application")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
@@ -1010,7 +1674,109 @@ global using global::System.Linq;
 global using global::System.Net.Http;
 global using global::System.Threading;
 global using global::System.Threading.Tasks;
-===== ./TenantDesk.Application/Common/PagedResult.cs =====
+===== ./TenantDesk.Application/Mapping/BusinessHourMappingProfile.cs =====
+
+using AutoMapper;
+using TenantDesk.Application.Dto.BusinessHour;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Mapping;
+    public class BusinessHourMappingProfile : Profile
+    {
+        public BusinessHourMappingProfile()
+        {
+            CreateMap<BusinessHour, BusinessHourResponseDto>();
+        }
+    }
+===== ./TenantDesk.Application/Mapping/PlanMappingProfile.cs =====
+�� 
+ u s i n g   A u t o M a p p e r ;  
+ u s i n g   T e n a n t D e s k . A p p l i c a t i o n . D t o . P l a n ;  
+ u s i n g   T e n a n t D e s k . D o m a i n . E n t i t i e s ;  
+  
+ n a m e s p a c e   T e n a n t D e s k . A p p l i c a t i o n . M a p p i n g ;  
+  
+ p u b l i c   c l a s s   P l a n M a p p i n g P r o f i l e   :   P r o f i l e  
+ {  
+         p u b l i c   P l a n M a p p i n g P r o f i l e ( )  
+         {  
+                 C r e a t e M a p < P l a n ,   P l a n R e s p o n s e D t o > ( ) ;  
+         }  
+  
+          
+ }  
+ ===== ./TenantDesk.Application/Mapping/UserMappingProfile.cs =====
+using AutoMapper;
+using TenantDesk.Application.Dto.User;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Mapping;
+
+public class UserMappingProfile : Profile
+{
+    public UserMappingProfile()
+    {
+        CreateMap<User, UserResponseDto>();
+    }
+}   ===== ./TenantDesk.Application/Mapping/SlaMappingProfile.cs =====
+using AutoMapper;
+using TenantDesk.Application.Dto.Sla;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Mapping
+{
+    public class SlaMappingProfile : Profile
+    {
+        public SlaMappingProfile()
+        {
+            CreateMap<Sla, SlaResponseDto>();
+        }
+    }
+}===== ./TenantDesk.Application/Mapping/TenantMappingProfile.cs =====
+��u s i n g   A u t o M a p p e r ;  
+ u s i n g   T e n a n t D e s k . A p p l i c a t i o n . D t o . T e n a n t ;  
+ u s i n g   T e n a n t D e s k . D o m a i n . E n t i t i e s ;  
+  
+ n a m e s p a c e   T e n a n t D e s k . A p p l i c a t i o n . M a p p i n g ;  
+  
+ p u b l i c   c l a s s   T e n a n t M a p p i n g P r o f i l e   :   P r o f i l e  
+ {  
+          
+         p u b l i c   T e n a n t M a p p i n g P r o f i l e ( )  
+         {  
+                 C r e a t e M a p < T e n a n t ,   T e n a n t R e s p o n s e D t o > ( ) ;  
+                 C r e a t e M a p < T e n a n t ,   T e n a n t L i s t D t o > ( ) ;  
+         }  
+  
+  
+ }  
+ ===== ./TenantDesk.Application/Mapping/TicketMappingProfile.cs =====
+using AutoMapper;
+using TenantDesk.Application.Dto.Ticket;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Mapping;
+
+public class TicketMappingProfile : Profile
+{
+    public TicketMappingProfile()
+    {
+        CreateMap<Ticket, TicketResponseDto>();
+    }
+}===== ./TenantDesk.Application/Mapping/CategoryMappingProfile.cs =====
+using AutoMapper;
+using TenantDesk.Application.Dto.Category;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Mapping;
+
+public class CategoryMappingProfile : Profile
+{
+    public CategoryMappingProfile()
+    {
+        CreateMap<Category, CategoryResponseDto>();
+    }
+}===== ./TenantDesk.Application/Common/PagedResult.cs =====
 namespace TenantDesk.Application.Common;
 
 public class PagedResult<T>
@@ -1090,7 +1856,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TenantDesk.Domain")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c26a1d23fb9c031a70cb453a398f2dd48b9ee440")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5268552214368fa453b191d4118c845114b9bda9")]
 [assembly: System.Reflection.AssemblyProductAttribute("TenantDesk.Domain")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TenantDesk.Domain")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
@@ -1378,6 +2144,8 @@ namespace TenantDesk.Domain.Entities
         public Guid TenantId { get; private set; }
         public Guid CategoryId { get; private set; }
         public Guid SlaId { get; private set; }
+        //navigation property 
+        public Sla Sla { get; private set; } = null!;
         public Guid CreatedBy { get; private set; }
         public Guid? AssignedTo { get; private set; }
         public string Title { get; private set; }
@@ -1454,8 +2222,6 @@ namespace TenantDesk.Domain.Entities
             UpdatedAt = DateTime.UtcNow;
         }
     }
-
-    
 }===== ./TenantDesk.Domain/Entities/User.cs =====
 using System;
 using TenantDesk.Domain.Enums;
@@ -1740,16 +2506,12 @@ namespace TenantDesk.Domain.Entities
 }===== ./TenantDesk.Api/Middleware/ExceptionMiddleware.cs =====
 namespace TenantDesk.Api.Middleware;
 
-public class ExceptionMiddleware
+public class ExceptionMiddleware(
+    RequestDelegate next,
+    ILogger<ExceptionMiddleware> logger)
 {
-    private readonly RequestDelegate _next;
-    private readonly ILogger<ExceptionMiddleware> _logger;
-
-    public ExceptionMiddleware(RequestDelegate next, ILogger<ExceptionMiddleware> logger)
-    {
-        _next = next;
-        _logger = logger;
-    }
+    private readonly RequestDelegate _next = next;
+    private readonly ILogger<ExceptionMiddleware> _logger = logger;
 
     public async Task InvokeAsync(HttpContext context)
     {
@@ -1760,16 +2522,27 @@ public class ExceptionMiddleware
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unhandled exception");
+
             context.Response.ContentType = "application/json";
+
             context.Response.StatusCode = ex switch
             {
                 KeyNotFoundException => StatusCodes.Status404NotFound,
+
                 UnauthorizedAccessException => StatusCodes.Status403Forbidden,
+
+                InvalidOperationException => StatusCodes.Status409Conflict,
+
                 _ => StatusCodes.Status400BadRequest
             };
-            await context.Response.WriteAsJsonAsync(new { error = ex.Message });
+
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = ex.Message
+            });
         }
     }
+    
 }===== ./TenantDesk.Api/obj/Debug/net9.0/.NETCoreApp,Version=v9.0.AssemblyAttributes.cs =====
 // <autogenerated />
 using System;
@@ -1809,7 +2582,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TenantDesk.Api")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c26a1d23fb9c031a70cb453a398f2dd48b9ee440")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5268552214368fa453b191d4118c845114b9bda9")]
 [assembly: System.Reflection.AssemblyProductAttribute("TenantDesk.Api")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TenantDesk.Api")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
@@ -1842,13 +2615,10 @@ namespace TenantDesk.Api.Controllers;
 
 [ApiController]
 [Route("api/auth")]
-public class AuthController : ControllerBase
+public class AuthController(IAuthService authService) : ControllerBase
 {
-    private readonly IAuthService _authService;
+    private readonly IAuthService _authService = authService;
 
-    public AuthController(IAuthService authService) => _authService = authService;
-
-    
     [HttpPost("register")]
     public async Task<ActionResult<AuthResponseDto>> Register(RegisterDto dto)
     {
@@ -1873,36 +2643,17 @@ namespace TenantDesk.Api.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class TenantsController : ControllerBase
+public class TenantsController(TenantService tenantService) : ControllerBase
 {
-    private readonly TenantService _tenantService;
-
-    public TenantsController(TenantService tenantService)
-    {
-        _tenantService = tenantService;
-    }
+    private readonly TenantService _tenantService = tenantService;
 
     // POST: api/tenants
     [HttpPost]
     public async Task<ActionResult<TenantResponseDto>> Create(CreateTenantDto dto)
     {
-        try
-        {
-            var tenant = await _tenantService.CreateAsync(dto);
+        var tenant = await _tenantService.CreateAsync(dto);
 
-            return CreatedAtAction(
-                nameof(GetById),
-                new { id = tenant.TenantId },
-                tenant);
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return Conflict(ex.Message);
-        }
+        return CreatedAtAction(nameof(GetById),new { id = tenant.TenantId },tenant);
     }
 
     // GET: api/tenants
@@ -1920,9 +2671,6 @@ public class TenantsController : ControllerBase
     {
         var tenant = await _tenantService.GetByIdAsync(id);
 
-        if (tenant is null)
-            return NotFound();
-
         return Ok(tenant);
     }
 
@@ -1932,77 +2680,42 @@ public class TenantsController : ControllerBase
         Guid id,
         UpdateTenantDto dto)
     {
-        try
-        {
-            var tenant = await _tenantService.UpdateAsync(id, dto);
+        var tenant = await _tenantService.UpdateAsync(id, dto);
 
-            return Ok(tenant);
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return Conflict(ex.Message);
-        }
+        return Ok(tenant);
     }
 
     // PUT: api/tenants/{id}/status
     [HttpPut("{id:guid}/status")]
-    public async Task<IActionResult> ChangeStatus(
-        Guid id,
-        ChangeTenantStatusDto dto)
+    public async Task<IActionResult> ChangeStatus( Guid id,ChangeTenantStatusDto dto)
     {
-        try
-        {
-            await _tenantService.ChangeStatusAsync(id, dto);
+        await _tenantService.ChangeStatusAsync(id, dto);
 
-            return NoContent();
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
+        return NoContent();
     }
 
     // PUT: api/tenants/{id}/plan
     [HttpPut("{id:guid}/plan")]
-    public async Task<IActionResult> ChangePlan(
-        Guid id,
-        ChangeTenantPlanDto dto)
+    public async Task<IActionResult> ChangePlan(Guid id,ChangeTenantPlanDto dto)
     {
-        try
-        {
-            await _tenantService.ChangePlanAsync(id, dto);
+        await _tenantService.ChangePlanAsync(id, dto);
 
-            return NoContent();
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
+        return NoContent();
     }
 
     // DELETE: api/tenants/{id}
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {
-        try
-        {
-            await _tenantService.DeleteAsync(id);
+        await _tenantService.DeleteAsync(id);
 
-            return NoContent();
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
+        return NoContent();
     }
+
+
 }
 
 ===== ./TenantDesk.Api/Controllers/PlansController.cs =====
-
 using Microsoft.AspNetCore.Mvc;
 using TenantDesk.Application.Services;
 using TenantDesk.Application.Dto.Plan;
@@ -2011,56 +2724,400 @@ namespace TenantDesk.Api.Controllers;
 
 [ApiController]
 [Route("api/plans")]
-public class PlansController : ControllerBase
+public class PlansController(PlanService planService) : ControllerBase
 {
-    private readonly PlanService _planService;
-
-    public PlansController(PlanService planService)
-    {
-        _planService = planService;
-    }
+    private readonly PlanService _planService = planService;
 
     // POST: api/plans
     [HttpPost]
-    public async Task<IActionResult> CreatePlan(CreatePlanDto dto)=>
-        Ok(await _planService.CreateAsync(dto));
+    public async Task<IActionResult> CreatePlan(CreatePlanDto dto)
+    {
+        var plan = await _planService.CreateAsync(dto);
 
-    
+        return CreatedAtAction(
+            nameof(GetPlanById),
+            new { planId = plan.PlanId },
+            plan);
+    }
+
     // GET: api/plans/{planId}
     [HttpGet("{planId}")]
-    public async Task<IActionResult> GetPlanById(Guid planId) => 
-        Ok(await _planService.GetByIdAsync(planId));
-    
+    public async Task<IActionResult> GetPlanById(Guid planId)
+    {
+        var plan = await _planService.GetByIdAsync(planId);
+
+        return Ok(plan);
+    }
+
     // GET: api/plans
     [HttpGet]
-    public async Task<IActionResult> GetAllPlans() => 
-        Ok(await _planService.GetAllAsync());
+    public async Task<IActionResult> GetAllPlans()
+    {
+        var plans = await _planService.GetAllAsync();
+
+        return Ok(plans);
+    }
 
     // PUT: api/plans/{planId}/rate-limit
     [HttpPut("{planId}/rate-limit")]
-    public async Task<IActionResult> ChangeRateLimit(Guid planId, ChangePlanRateLimitDto dto) =>
-        Ok(await _planService.ChangeRateLimitAsync(planId, dto));
+    public async Task<IActionResult> ChangeRateLimit(
+        Guid planId,
+        ChangePlanRateLimitDto dto)
+    {
+        await _planService.ChangeRateLimitAsync(planId, dto);
 
+        return NoContent();
+    }
 
     // DELETE: api/plans/{id}
     [HttpDelete("{id}")]
     public async Task<IActionResult> Delete(Guid id)
     {
         await _planService.DeleteAsync(id);
+
         return NoContent();
     }
 
 
+    
+}===== ./TenantDesk.Api/Controllers/UsersController.cs =====
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.User;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class UsersController(UserService _userService) : ControllerBase
+{
+
+    
+
+    // GET: api/users/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<UserResponseDto>> GetById(Guid id)
+    {
+        var user = await _userService.GetByIdAsync(id);
+
+        return Ok(user);
+    }
+
+    // GET: api/users?role=Agent&isActive=true&page=1&pageSize=20
+    [HttpGet]
+    public async Task<ActionResult<PagedResult<UserResponseDto>>> GetFiltered([FromQuery] UserFilter filter)
+    {
+        var result = await _userService.GetFilteredAsync(filter);
+
+        return Ok(result);
+    }
+
+    // PUT: api/users/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<UserResponseDto>> Update(Guid id, UpdateUserDto dto)
+    {
+        var user = await _userService.UpdateAsync(id, dto);
+
+        return Ok(user);
+    }
+
+    // PUT: api/users/{id}/status
+    [HttpPut("{id:guid}/status")]
+    public async Task<IActionResult> ChangeStatus(Guid id, ChangeUserStatusDto dto)
+    {
+        await _userService.ChangeStatusAsync(id, dto);
+
+        return NoContent();
+    }
+
+    // DELETE: api/users/{id}
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _userService.DeleteAsync(id);
+
+        return NoContent();
+    }
+}===== ./TenantDesk.Api/Controllers/SlasController.cs =====
 
 
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Dto.Sla;
+using TenantDesk.Application.Services;
+using TenantDesk.Domain.Enums;
 
-   
+namespace TenantDesk.Api.Controllers;
 
+[ApiController]
+[Route("api/[controller]")]
+public class SlasController : ControllerBase
+{
+    private readonly SlaService _slaService;
+
+    public SlasController(SlaService slaService)
+    {
+        _slaService = slaService;
+    }
+
+    // POST: api/slas
+    [HttpPost]
+    public async Task<ActionResult<SlaResponseDto>> Create([FromBody] CreateSlaDto dto)
+    {
+        var result = await _slaService.CreateAsync(dto);
+        return CreatedAtAction(nameof(GetById), new { id = result.SlaId }, result);
+    }
+
+    // GET: api/slas/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<SlaResponseDto>> GetById(Guid id)
+    {
+        var result = await _slaService.GetByIdAsync(id);
+        return Ok(result);
+    }
+
+    // GET: api/slas
+    [HttpGet]
+    public async Task<ActionResult<IEnumerable<SlaResponseDto>>> GetAll()
+    {
+        var result = await _slaService.GetAllAsync();
+        return Ok(result);
+    }
+
+    // GET: api/slas/priority/{priority}
+    [HttpGet("priority/{priority}")]
+    public async Task<ActionResult<SlaResponseDto>> GetByPriority(PriorityLevel priority)
+    {
+        var result = await _slaService.GetByPriorityAsync(priority);
+        return Ok(result);
+    }
+
+    // PUT: api/slas/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<SlaResponseDto>> Update(Guid id, [FromBody] UpdateSlaTimesDto dto)
+    {
+        var result = await _slaService.UpdateAsync(id, dto);
+        return Ok(result);
+    }
+
+    // DELETE: api/slas/{id}
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _slaService.DeleteAsync(id);
+        return NoContent();
+    }
+}===== ./TenantDesk.Api/Controllers/BusinessHoursController.cs =====
+
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Dto.BusinessHour;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/business-hours")]
+public class BusinessHoursController : ControllerBase
+{
+    private readonly BusinessHourService _businessHourService;
+
+    public BusinessHoursController(BusinessHourService businessHourService)
+    {
+        _businessHourService = businessHourService;
+    }
+
+    // POST: api/business-hours
+    [HttpPost]
+    public async Task<ActionResult<BusinessHourResponseDto>> Create([FromBody] CreateBusinessHourDto dto)
+    {
+        var result = await _businessHourService.CreateAsync(dto);
+        return CreatedAtAction(nameof(GetById), new { id = result.BusinessHourId }, result);
+    }
+
+    // GET: api/business-hours/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<BusinessHourResponseDto>> GetById(Guid id)
+    {
+        var result = await _businessHourService.GetByIdAsync(id);
+        return Ok(result);
+    }
+
+    // GET: api/business-hours
+    [HttpGet]
+    public async Task<ActionResult<IEnumerable<BusinessHourResponseDto>>> GetAll()
+    {
+        var result = await _businessHourService.GetAllAsync();
+        return Ok(result);
+    }
+
+    // GET: api/business-hours/day/{day}
+    [HttpGet("day/{day}")]
+    public async Task<ActionResult<BusinessHourResponseDto>> GetByDay(DayOfWeek day)
+    {
+        var result = await _businessHourService.GetByDayAsync(day);
+        return Ok(result);
+    }
+
+    // PUT: api/business-hours/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<BusinessHourResponseDto>> Update(Guid id, [FromBody] UpdateBusinessHourDto dto)
+    {
+        var result = await _businessHourService.UpdateAsync(id, dto);
+        return Ok(result);
+    }
+
+    // DELETE: api/business-hours/{id}
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _businessHourService.DeleteAsync(id);
+        return NoContent();
+    }
+}===== ./TenantDesk.Api/Controllers/CategoryController.cs =====
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Category;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class CategoriesController(CategoryService _categoryService) : ControllerBase
+{
+    // POST: api/categories
+    [HttpPost]
+    public async Task<ActionResult<CategoryResponseDto>> Create(CreateCategoryDto dto)
+    {
+        var category = await _categoryService.CreateAsync(dto);
+
+        return CreatedAtAction(
+            nameof(GetById),
+            new { id = category.CategoryId },
+            category);
+    }
+
+    // GET: api/categories/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<CategoryResponseDto>> GetById(Guid id)
+    {
+        var category = await _categoryService.GetByIdAsync(id);
+
+        return Ok(category);
+    }
+
+    // GET: api/categories?isActive=true&page=1&pageSize=20
+    [HttpGet]
+    public async Task<ActionResult<PagedResult<CategoryResponseDto>>> GetFiltered([FromQuery] CategoryFilter filter)
+    {
+        var result = await _categoryService.GetFilteredAsync(filter);
+
+        return Ok(result);
+    }
+
+    // PUT: api/categories/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<CategoryResponseDto>> Update(Guid id, UpdateCategoryDto dto)
+    {
+        var category = await _categoryService.UpdateAsync(id, dto);
+
+        return Ok(category);
+    }
+
+    // DELETE: api/categories/{id}
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _categoryService.DeleteAsync(id);
+
+        return NoContent();
+    }
+}===== ./TenantDesk.Api/Controllers/TicketsController.cs =====
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Ticket;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class TicketsController(TicketService _ticketService) : ControllerBase
+{
+    // POST: api/tickets
+    [HttpPost]
+    public async Task<ActionResult<TicketResponseDto>> Create(CreateTicketDto dto)
+    {
+        var ticket = await _ticketService.CreateAsync(dto);
+
+        return CreatedAtAction(
+            nameof(GetById),
+            new { id = ticket.TicketId },
+            ticket);
+    }
+
+    // GET: api/tickets/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<TicketResponseDto>> GetById(Guid id)
+    {
+        var ticket = await _ticketService.GetByIdAsync(id);
+
+        return Ok(ticket);
+    }
+
+    // GET: api/tickets?status=Open&categoryId=...&page=1&pageSize=20
+    [HttpGet]
+    public async Task<ActionResult<PagedResult<TicketResponseDto>>> GetFiltered([FromQuery] TicketFilter filter)
+    {
+        var result = await _ticketService.GetFilteredAsync(filter);
+
+        return Ok(result);
+    }
+
+    // PUT: api/tickets/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<TicketResponseDto>> UpdateDetails(Guid id, UpdateTicketDto dto)
+    {
+        var ticket = await _ticketService.UpdateDetailsAsync(id, dto);
+
+        return Ok(ticket);
+    }
+
+    // PATCH: api/tickets/{id}/status
+    [HttpPatch("{id:guid}/status")]
+    public async Task<ActionResult<TicketResponseDto>> ChangeStatus(Guid id, ChangeTicketStatusDto dto)
+    {
+        var ticket = await _ticketService.ChangeStatusAsync(id, dto.Status);
+
+        return Ok(ticket);
+    }
+
+    // PATCH: api/tickets/{id}/assign
+    [HttpPatch("{id:guid}/assign")]
+    public async Task<ActionResult<TicketResponseDto>> Assign(Guid id, AssignTicketDto dto)
+    {
+        var ticket = await _ticketService.AssignAsync(id, dto.AssignedTo);
+
+        return Ok(ticket);
+    }
+
+    // PATCH: api/tickets/{id}/close
+    [HttpPatch("{id:guid}/close")]
+    public async Task<ActionResult<TicketResponseDto>> Close(Guid id)
+    {
+        var ticket = await _ticketService.CloseAsync(id);
+
+        return Ok(ticket);
+    }
 }===== ./TenantDesk.Api/Program.cs =====
 using Microsoft.EntityFrameworkCore;
 using TenantDesk.Application.Common.Interfaces;
 using TenantDesk.Application.Interfaces;
 using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Services;
 using TenantDesk.Infrastructure.Data;
 using TenantDesk.Application.Services;
 using TenantDesk.Infrastructure.Repositories;
@@ -2072,6 +3129,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.IdentityModel.Tokens;
 using TenantDesk.Domain.Entities;
 using System.Text;
+using TenantDesk.Application.Mapping;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -2088,7 +3146,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         ServerVersion.AutoDetect(connectionString)
     )
 );
-
+builder.Services.AddAutoMapper(typeof(UserMappingProfile).Assembly);
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 
 // --- from development: Plan + Tenant (Phase 2) ---
@@ -2097,8 +3155,26 @@ builder.Services.AddScoped<PlanService>();
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<TenantService>();
 // --- end Phase 2 ---
+builder.Services.AddScoped<ITicketRepository, TicketRepository>();
+
+builder.Services.AddScoped<ISlaRepository, SlaRepository>();
+builder.Services.AddScoped<SlaService>();
+builder.Services.AddScoped<TicketService>();
+builder.Services.AddScoped<IBusinessHourRepository, BusinessHourRepository>();
+builder.Services.AddScoped<BusinessHourService>();
+
+builder.Services.AddScoped<IDateTimeProvider, DateTimeProvider>();
+builder.Services.AddScoped<ISlaCalculatorService, SlaCalculatorService>();
+
+builder.Services.AddScoped<INotificationRepository, NotificationRepository>();
+builder.Services.AddScoped<INotificationDispatcher, NotificationDispatcher>();
+builder.Services.AddScoped<IEmailService, EmailService>();
+
 
 builder.Services.AddHttpContextAccessor();
+
+builder.Services.AddScoped<ICategoryRepository, CategoryRepository>();   
+builder.Services.AddScoped<CategoryService>();                            
 
 // --- JWT Authentication setup ---
 var jwtSection = builder.Configuration.GetSection("Jwt");
@@ -2124,8 +3200,8 @@ builder.Services.AddAuthorization();
 // --- end JWT Authentication setup ---
 
 // --- Application services (Phase 3: Auth + User) ---
-//builder.Services.AddScoped<IUserRepository, UserRepository>();
-//builder.Services.AddScoped<UserService>();
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddScoped<UserService>();
 builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
 builder.Services.AddScoped<ICurrentTenantService, CurrentTenantService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
@@ -2156,10 +3232,8 @@ using TenantDesk.Domain.Entities;
 
 namespace TenantDesk.Infrastructure.Data;
 
-public class AppDbContext : DbContext
+public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
 {
-    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
-
     public DbSet<Tenant> Tenants => Set<Tenant>();
     public DbSet<Plan> Plans => Set<Plan>();
     public DbSet<User> Users => Set<User>();
@@ -2183,12 +3257,10 @@ using Microsoft.EntityFrameworkCore.Storage;
 
 namespace TenantDesk.Infrastructure.Data;
 
-public class UnitOfWork : IUnitOfWork
+public class UnitOfWork(AppDbContext context) : IUnitOfWork
 {
-    private readonly AppDbContext _context;
+    private readonly AppDbContext _context = context;
     private IDbContextTransaction? _transaction;
-
-    public UnitOfWork(AppDbContext context) => _context = context;
 
     public Task<int> SaveChangesAsync() => _context.SaveChangesAsync();
 
@@ -2222,7 +3294,50 @@ public class Class1
 {
 
 }
-===== ./TenantDesk.Infrastructure/Identity/AuthService.cs =====
+===== ./TenantDesk.Infrastructure/Services/DateTimeProvider.cs =====
+
+using TenantDesk.Application.Interfaces.Services;
+
+namespace TenantDesk.Infrastructure.Services;
+    public class DateTimeProvider : IDateTimeProvider
+    {
+        public DateTime UtcNow => DateTime.UtcNow;
+
+        public DateTime Today => DateTime.UtcNow.Date;
+    
+    }
+===== ./TenantDesk.Infrastructure/Services/IEmailService.cs =====
+
+using Microsoft.Extensions.Logging;
+using TenantDesk.Application.Interfaces.Services;
+
+namespace TenantDesk.Infrastructure.Services;
+
+public class EmailService(ILogger<EmailService> logger) : IEmailService
+{
+    private readonly ILogger<EmailService> _logger = logger;
+
+    public Task SendAsync(string to, string subject, string body)
+    {
+        _logger.LogInformation("[Email Stub] Sending email to '{To}' | Subject: '{Subject}' | Body: '{Body}'",to, subject, body);
+
+        return Task.CompletedTask;
+    }
+
+    public Task SendTicketAssignedEmailAsync(string to, Guid ticketId)
+    {
+        _logger.LogInformation("[Email Stub] Ticket assigned notification sent to '{To}' for Ticket ID: '{TicketId}'",to, ticketId);
+
+        return Task.CompletedTask;
+    }
+
+    public Task SendSlaBreachWarningEmailAsync(string to, Guid ticketId, DateTime breachTime)
+    {
+        _logger.LogInformation("[Email Stub] SLA Breach Warning sent to '{To}' for Ticket ID: '{TicketId}' | Breach Time: {BreachTime:u}",to, ticketId, breachTime);
+
+        return Task.CompletedTask;
+    }
+}===== ./TenantDesk.Infrastructure/Identity/AuthService.cs =====
 using System.IdentityModel.Tokens.Jwt;
 using Microsoft.AspNetCore.Identity;
 using TenantDesk.Application.Interfaces;
@@ -2234,27 +3349,14 @@ using TenantDesk.Domain.Enums;
 
 namespace TenantDesk.Infrastructure.Identity;
 
-public class AuthService : IAuthService
+public class AuthService(
+    IUserRepository userRepository,
+    ITenantRepository _tenantRepository,
+    ITokenService _tokenService,
+    IPasswordHasher<User> _passwordHasher,
+    IUnitOfWork _unitOfWork) : IAuthService
 {
-    private readonly IUserRepository _userRepository;
-    private readonly ITenantRepository _tenantRepository;
-    private readonly ITokenService _tokenService;
-    private readonly IPasswordHasher<User> _passwordHasher;
-    private readonly IUnitOfWork _unitOfWork;
-
-    public AuthService(
-        IUserRepository userRepository,
-        ITenantRepository tenantRepository,
-        ITokenService tokenService,
-        IPasswordHasher<User> passwordHasher,
-        IUnitOfWork unitOfWork)
-    {
-        _userRepository = userRepository;
-        _tenantRepository = tenantRepository;
-        _tokenService = tokenService;
-        _passwordHasher = passwordHasher;
-        _unitOfWork = unitOfWork;
-    }
+    
 
     public async Task<AuthResponseDto> RegisterAsync(RegisterDto dto)
     {
@@ -2268,7 +3370,7 @@ public class AuthService : IAuthService
         //    uniqueness means the same email CAN exist in different tenants,
         //    but not twice in the same one — that's exactly what
         //    ExistsByEmailAsync(tenantId, email) checks.
-        var emailTaken = await _userRepository.ExistsByEmailAsync(tenant.TenantId, dto.Email.Trim().ToLower());
+        var emailTaken = await userRepository.ExistsByEmailAsync(tenant.TenantId, dto.Email.Trim().ToLower());
         if (emailTaken)
             throw new InvalidOperationException("A user with this email already exists in this tenant.");
 
@@ -2284,7 +3386,7 @@ public class AuthService : IAuthService
         //    DbContext; the actual SQL INSERT + commit happens in
         //    _unitOfWork.SaveChangesAsync() — this is the pattern your
         //    UnitOfWork class already uses everywhere else in the project.
-        await _userRepository.AddAsync(user);
+        await userRepository.AddAsync(user);
         await _unitOfWork.SaveChangesAsync();
 
         // 5. Issue a token immediately so the user is logged in right after
@@ -2303,7 +3405,7 @@ public class AuthService : IAuthService
         // Tenant-scoped lookup: finds the user only if they belong to THIS
         // tenant, so there's no ambiguity if the same email exists under a
         // different tenant.
-        var user = await _userRepository.GetByEmailAsync(dto.Email.Trim().ToLower(), tenant.TenantId)
+        var user = await userRepository.GetByEmailAsync(dto.Email.Trim().ToLower(), tenant.TenantId)
             ?? throw new UnauthorizedAccessException("Invalid credentials.");
 
         // Note: we deliberately throw the SAME generic "Invalid credentials"
@@ -2342,11 +3444,9 @@ using TenantDesk.Domain.Enums;
 
 namespace TenantDesk.Infrastructure.Services;
 
-public class CurrentUserService : ICurrentUserService
+public class CurrentUserService(IHttpContextAccessor accessor) : ICurrentUserService
 {
-    private readonly IHttpContextAccessor _accessor;
-
-    public CurrentUserService(IHttpContextAccessor accessor) => _accessor = accessor;
+    private readonly IHttpContextAccessor _accessor = accessor;
 
     public Guid GetUserId()
     {
@@ -2376,11 +3476,9 @@ using TenantDesk.Application.Interfaces.Identity;
 
 namespace TenantDesk.Infrastructure.Services;
 
-public class CurrentTenantService : ICurrentTenantService
+public class CurrentTenantService(IHttpContextAccessor accessor) : ICurrentTenantService
 {
-    private readonly IHttpContextAccessor _accessor;
-
-    public CurrentTenantService(IHttpContextAccessor accessor) => _accessor = accessor;
+    private readonly IHttpContextAccessor _accessor = accessor;
 
     public Guid GetTenantId()
     {
@@ -2405,13 +3503,11 @@ using TenantDesk.Domain.Entities;
 
 namespace TenantDesk.Infrastructure.Identity;
 
-public class TokenService : ITokenService
+public class TokenService(IConfiguration config) : ITokenService
 {
-    private readonly IConfiguration _config;
+    private readonly IConfiguration _config = config;
 
-    public TokenService(IConfiguration config) => _config = config;
-
-public string TokenGenerateToken(User user)    {
+    public string TokenGenerateToken(User user)    {
         var jwtSection = _config.GetSection("Jwt");
 
         
@@ -2476,13 +3572,217 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TenantDesk.Infrastructure")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c26a1d23fb9c031a70cb453a398f2dd48b9ee440")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5268552214368fa453b191d4118c845114b9bda9")]
 [assembly: System.Reflection.AssemblyProductAttribute("TenantDesk.Infrastructure")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TenantDesk.Infrastructure")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
 
 // Generated by the MSBuild WriteCodeFragment class.
 
+===== ./TenantDesk.Infrastructure/Repositories/BusinessHourRepository.cs =====
+
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class BusinessHourRepository : IBusinessHourRepository
+{
+    private readonly AppDbContext _context;
+
+     public BusinessHourRepository(AppDbContext context)
+        {
+            _context = context;
+        }
+
+        public async Task<IEnumerable<BusinessHour>> GetByTenantAsync(Guid tenantId)
+        {
+            return await _context.BusinessHours
+                .AsNoTracking()
+                .Where(b => b.TenantId == tenantId)
+                .OrderBy(b => b.DayOfWeek)
+                .ToListAsync();
+        }
+
+        public async Task<BusinessHour?> GetByDayAsync(Guid tenantId, DayOfWeek day)
+        {
+            return await _context.BusinessHours
+                .FirstOrDefaultAsync(b => b.TenantId == tenantId && b.DayOfWeek == day);
+        }
+
+        public async Task<BusinessHour?> GetByIdAsync(Guid id)
+        {
+            return await _context.BusinessHours
+                .FirstOrDefaultAsync(b => b.BusinessHourId == id);
+        }
+
+        public async Task<bool> IsWithinBusinessHoursAsync(Guid tenantId, DateTime time)
+        {
+            var businessHour = await _context.BusinessHours
+                .AsNoTracking()
+                .FirstOrDefaultAsync(b => b.TenantId == tenantId && b.DayOfWeek == time.DayOfWeek);
+
+            if (businessHour is null || !businessHour.IsWorkingDay)
+                return false;
+
+            var timeOnly = TimeOnly.FromDateTime(time);
+
+            return timeOnly >= businessHour.OpenTime && timeOnly < businessHour.CloseTime;
+        }
+
+        public async Task AddAsync(BusinessHour businessHour)
+        {
+            await _context.BusinessHours.AddAsync(businessHour);
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task UpdateAsync(BusinessHour businessHour)
+        {
+            _context.BusinessHours.Update(businessHour);
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task DeleteAsync(Guid id)
+        {
+            var businessHour = await _context.BusinessHours.FirstOrDefaultAsync(b => b.BusinessHourId == id);
+            if (businessHour is not null)
+            {
+                _context.BusinessHours.Remove(businessHour);
+                await _context.SaveChangesAsync();
+            }
+        }
+
+
+}
+===== ./TenantDesk.Infrastructure/Repositories/CategoryRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class CategoryRepository(AppDbContext _context) : ICategoryRepository
+{
+    public Task<Category?> GetByIdAsync(Guid id) =>
+        _context.Categories.FirstOrDefaultAsync(c => c.CategoryId == id);
+
+    public Task<bool> ExistsByNameAsync(Guid tenantId, string name) =>
+        _context.Categories.AnyAsync(c => c.TenantId == tenantId && c.CategoryName == name);
+
+    public Task<int> GetTicketCountByCategoryAsync(Guid categoryId) =>
+        _context.Tickets.CountAsync(t => t.CategoryId == categoryId);
+
+    public async Task<PagedResult<Category>> GetFilteredAsync(CategoryFilter filter)
+    {
+        var query = _context.Categories.Where(c => c.TenantId == filter.TenantId);
+
+        if (filter.IsActive is not null)
+            query = query.Where(c => c.IsActive == filter.IsActive);
+
+        query = query.OrderByDescending(c => c.CreatedAt);
+
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip((filter.Page - 1) * filter.PageSize)
+            .Take(filter.PageSize)
+            .ToListAsync();
+
+        return new PagedResult<Category>
+        {
+            Items = items,
+            TotalCount = total,
+            Page = filter.Page,
+            PageSize = filter.PageSize
+        };
+    }
+
+    public async Task AddAsync(Category category)
+    {
+        await _context.Categories.AddAsync(category);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(Category category)
+    {
+        _context.Categories.Update(category);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var category = await GetByIdAsync(id);
+        if (category is not null)
+        {
+            _context.Categories.Remove(category);
+            await _context.SaveChangesAsync();
+        }
+    }
+}===== ./TenantDesk.Infrastructure/Repositories/SlaRepository.cs =====
+
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class SlaRepository : ISlaRepository
+{
+    private readonly AppDbContext _context;
+
+    public SlaRepository(AppDbContext context)
+    {
+        _context = context;
+    }
+
+    public async Task<Sla?> GetByIdAsync(Guid id)
+    {
+        return await _context.Slas.FirstOrDefaultAsync(s => s.SlaId == id);
+    }
+
+    public async Task<Sla?> GetByTenantAndPriorityAsync(Guid tenantId,PriorityLevel priority)
+    {
+        return await _context.Slas
+            .FirstOrDefaultAsync(s => s.TenantId == tenantId && s.Priority == priority);
+    }
+
+    public async Task<IEnumerable<Sla>> GetAllByTenantAsync(Guid tenantId)
+    {
+        return await _context.Slas.AsNoTracking()
+            .Where(s => s.TenantId == tenantId).ToListAsync();
+    }
+
+    public async Task AddAsync(Sla sla)
+    {
+        await _context.Slas.AddAsync(sla);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(Sla sla)
+    {
+        _context.Slas.Update(sla);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var sla = await _context.Slas
+            .FirstOrDefaultAsync(s => s.SlaId == id);
+
+        if (sla is null)
+            return;
+
+        _context.Slas.Remove(sla);
+        await _context.SaveChangesAsync();
+    }
+
+
+}
 ===== ./TenantDesk.Infrastructure/Repositories/PlanRepository.cs =====
 
 using Microsoft.EntityFrameworkCore;
@@ -2492,15 +3792,10 @@ using TenantDesk.Infrastructure.Data;
 
 namespace TenantDesk.Infrastructure.Repositories;
 
-public class PlanRepository : IPlanRepository
+public class PlanRepository(AppDbContext context) : IPlanRepository
 {
   
-    private readonly AppDbContext _context;
-
-    public PlanRepository(AppDbContext context)
-    {
-        _context = context;
-    }
+    private readonly AppDbContext _context = context;
 
     public Task<Plan?> GetByIdAsync(Guid id) =>
     _context.Plans.FirstOrDefaultAsync(p => p.PlanId == id);
@@ -2536,6 +3831,232 @@ public class PlanRepository : IPlanRepository
         }
     }
 
+}===== ./TenantDesk.Infrastructure/Repositories/UserRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class UserRepository(AppDbContext _context) : IUserRepository
+{
+
+    public Task<User?> GetByIdAsync(Guid id) =>
+        _context.Users.FirstOrDefaultAsync(u => u.UserId == id);
+
+    public Task<User?> GetByEmailAsync(string email, Guid tenantId) =>
+        _context.Users.FirstOrDefaultAsync(u => u.Email == email && u.TenantId == tenantId);
+
+    public Task<User?> GetByMicrosoftIdAsync(string msId) =>
+        _context.Users.FirstOrDefaultAsync(u => u.MicrosoftUserId == msId);
+
+    public Task<bool> ExistsByEmailAsync(Guid tenantId, string email) =>
+        _context.Users.AnyAsync(u => u.TenantId == tenantId && u.Email == email);
+
+    public async Task<PagedResult<User>> GetFilteredAsync(UserFilter filter)
+    {
+        var page = filter.Page < 1 ? 1 : filter.Page;
+        var pageSize = filter.PageSize is < 1 or > 100 ? 20 : filter.PageSize;
+        
+        var query = _context.Users.Where(u => u.TenantId == filter.TenantId);
+
+        if (filter.Role is not null)
+            query = query.Where(u => u.Role == filter.Role);
+
+        if (filter.IsActive is not null)
+            query = query.Where(u => u.IsActive == filter.IsActive);
+
+        if (!string.IsNullOrWhiteSpace(filter.SearchKeyword))
+            query = query.Where(u => u.Email.Contains(filter.SearchKeyword));
+
+        query = query.OrderByDescending(u => u.CreatedAt);
+    
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip((filter.Page - 1) * filter.PageSize)
+            .Take(filter.PageSize)
+            .ToListAsync();
+
+        return new PagedResult<User>
+        {
+            Items = items,
+            TotalCount = total,
+            Page = filter.Page,
+            PageSize = filter.PageSize
+        };
+    }
+
+    public async Task AddAsync(User user)
+    {
+        await _context.Users.AddAsync(user);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(User user)
+    {
+        _context.Users.Update(user);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var user = await GetByIdAsync(id);
+        if (user is not null)
+        {
+            _context.Users.Remove(user);
+            await _context.SaveChangesAsync();
+        }
+    }
+}===== ./TenantDesk.Infrastructure/Repositories/TicketRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class TicketRepository(AppDbContext _context) : ITicketRepository
+{
+    public Task<Ticket?> GetByIdAsync(Guid id) =>
+        _context.Tickets.FirstOrDefaultAsync(t => t.TicketId == id);
+
+    public Task<bool> ExistsAsync(Guid id) =>
+        _context.Tickets.AnyAsync(t => t.TicketId == id);
+
+    public Task<int> CountByStatusAsync(Guid tenantId, TicketStatus status) =>
+        _context.Tickets.CountAsync(t => t.TenantId == tenantId && t.Status == status);
+
+    public Task<int> CountAssignedToUserAsync(Guid userId) =>
+        _context.Tickets.CountAsync(t => t.AssignedTo == userId);
+
+    public Task<int> CountByTenantAsync(Guid tenantId) =>
+        _context.Tickets.CountAsync(t => t.TenantId == tenantId);
+
+    public async Task<PagedResult<Ticket>> GetFilteredAsync(TicketFilter filter)
+    {
+        var query = _context.Tickets.Where(t => t.TenantId == filter.TenantId);
+
+        if (filter.Status is not null)
+            query = query.Where(t => t.Status == filter.Status);
+
+        if (filter.Priority is not null)
+            query = query.Where(t => t.Sla.Priority == filter.Priority);
+
+        if (filter.CategoryId is not null)
+            query = query.Where(t => t.CategoryId == filter.CategoryId);
+
+        if (filter.AssignedTo is not null)
+            query = query.Where(t => t.AssignedTo == filter.AssignedTo);
+
+        if (filter.CreatedBy is not null)
+            query = query.Where(t => t.CreatedBy == filter.CreatedBy);
+
+        if (filter.UnassignedOnly == true)
+            query = query.Where(t => t.AssignedTo == null);
+
+        if (!string.IsNullOrWhiteSpace(filter.SearchKeyword))
+        {
+            var keyword = filter.SearchKeyword.Trim();
+            query = query.Where(t =>
+                t.Title.Contains(keyword) ||
+                (t.Description != null && t.Description.Contains(keyword)));
+        }
+
+        query = filter.SortBy switch
+        {
+            "Title" => filter.SortDescending ? query.OrderByDescending(t => t.Title) : query.OrderBy(t => t.Title),
+            "Status" => filter.SortDescending ? query.OrderByDescending(t => t.Status) : query.OrderBy(t => t.Status),
+            "UpdatedAt" => filter.SortDescending ? query.OrderByDescending(t => t.UpdatedAt) : query.OrderBy(t => t.UpdatedAt),
+            _ => filter.SortDescending ? query.OrderByDescending(t => t.CreatedAt) : query.OrderBy(t => t.CreatedAt)
+        };
+
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip((filter.Page - 1) * filter.PageSize)
+            .Take(filter.PageSize)
+            .ToListAsync();
+
+        return new PagedResult<Ticket>
+        {
+            Items = items,
+            TotalCount = total,
+            Page = filter.Page,
+            PageSize 
+
+= filter.PageSize
+        };
+    }
+
+    public async Task AddAsync(Ticket ticket)
+    {
+        await _context.Tickets.AddAsync(ticket);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(Ticket ticket)
+    {
+        _context.Tickets.Update(ticket);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var ticket = await GetByIdAsync(id);
+        if (ticket is not null)
+        {
+            _context.Tickets.Remove(ticket);
+            await _context.SaveChangesAsync();
+        }
+    }
+}===== ./TenantDesk.Infrastructure/Repositories/NotificationRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class NotificationRepository : INotificationRepository
+{
+    private readonly AppDbContext _context;
+
+    public NotificationRepository(AppDbContext context)
+    {
+        _context = context;
+    }
+
+    public async Task<Notification?> GetByIdAsync(Guid id) =>
+        await _context.Notifications.FirstOrDefaultAsync(n => n.NotificationId == id);
+
+    public async Task AddAsync(Notification notification)
+    {
+        await _context.Notifications.AddAsync(notification);
+        await _context.SaveChangesAsync();
+    }
+
+    public Task<int> CountUnreadByUserAsync(Guid userId) =>
+        Task.FromResult(0);
+
+    public Task MarkAsReadAsync(Guid id) =>
+        Task.CompletedTask;
+
+    public Task MarkAllAsReadAsync(Guid userId) =>
+        Task.CompletedTask;
+
+    public Task DeleteOldNotificationsAsync(Guid tenantId, DateTime olderThan) =>
+        Task.CompletedTask;
+
+    public Task<PagedResult<Notification>> GetFilteredAsync(NotificationFilter filter) =>
+        throw new NotImplementedException("Phase 11: NotificationsController query side.");
+
+
 }===== ./TenantDesk.Infrastructure/Repositories/TenantRepository.cs =====
 using Microsoft.EntityFrameworkCore;
 using TenantDesk.Application.Interfaces;
@@ -2544,14 +4065,9 @@ using TenantDesk.Infrastructure.Data;
 
 namespace TenantDesk.Infrastructure.Repositories;
 
-public class TenantRepository : ITenantRepository
+public class TenantRepository(AppDbContext context) : ITenantRepository
 {
-    private readonly AppDbContext _context;
-
-    public TenantRepository(AppDbContext context)
-    {
-        _context = context;
-    }
+    private readonly AppDbContext _context = context;
 
     public Task<Tenant?> GetByIdAsync(Guid id) =>
         _context.Tenants.FirstOrDefaultAsync(t => t.TenantId == id);
@@ -2773,7 +4289,7 @@ public class AttachmentConfiguration : IEntityTypeConfiguration<Attachment>
         builder.HasIndex(a => a.UploadedBy);
     }
 }===== ./TenantDesk.Infrastructure/Configuration/TicketConfiguration.cs =====
-    using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using TenantDesk.Domain.Entities;
 
@@ -2813,7 +4329,7 @@ public class TicketConfiguration : IEntityTypeConfiguration<Ticket>
             .HasForeignKey(t => t.CategoryId)
             .OnDelete(DeleteBehavior.Restrict);
 
-        builder.HasOne<Sla>()
+        builder.HasOne(t => t.Sla)
             .WithMany()
             .HasForeignKey(t => t.SlaId)
             .OnDelete(DeleteBehavior.Restrict);
@@ -3083,7 +4599,648 @@ namespace TenantDesk.Infrastructure.Configurations
                 .OnDelete(DeleteBehavior.Restrict);
         }
     }
-}===== ./TenantDesk.Infrastructure/Migrations/AppDbContextModelSnapshot.cs =====
+}===== ./TenantDesk.Infrastructure/Migrations/20260902045928_AddPasswordHashToUsers.cs =====
+﻿using Microsoft.EntityFrameworkCore.Migrations;
+
+#nullable disable
+
+namespace TenantDesk.Infrastructure.Migrations
+{
+    /// <inheritdoc />
+    public partial class AddPasswordHashToUsers : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.AddColumn<string>(
+                name: "PasswordHash",
+                table: "Users",
+                type: "longtext",
+                nullable: false)
+                .Annotation("MySql:CharSet", "utf8mb4");
+        }
+
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.DropColumn(
+                name: "PasswordHash",
+                table: "Users");
+        }
+    }
+}
+===== ./TenantDesk.Infrastructure/Migrations/20260903064859_AddTicketSlaNavigation.Designer.cs =====
+﻿// <auto-generated />
+using System;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using TenantDesk.Infrastructure.Data;
+
+#nullable disable
+
+namespace TenantDesk.Infrastructure.Migrations
+{
+    [DbContext(typeof(AppDbContext))]
+    [Migration("20260903064859_AddTicketSlaNavigation")]
+    partial class AddTicketSlaNavigation
+    {
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
+        {
+#pragma warning disable 612, 618
+            modelBuilder
+                .HasAnnotation("ProductVersion", "9.0.19")
+                .HasAnnotation("Relational:MaxIdentifierLength", 64);
+
+            MySqlModelBuilderExtensions.AutoIncrementColumns(modelBuilder);
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Attachment", b =>
+                {
+                    b.Property<Guid>("AttachmentId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid?>("CommentId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<long>("FileSize")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("StoragePath")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("UploadedBy")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("AttachmentId");
+
+                    b.HasIndex("CommentId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("UploadedBy");
+
+                    b.ToTable("Attachments", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.BusinessHour", b =>
+                {
+                    b.Property<Guid>("BusinessHourId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<TimeOnly?>("CloseTime")
+                        .HasColumnType("time(6)");
+
+                    b.Property<int>("DayOfWeek")
+                        .HasColumnType("int");
+
+                    b.Property<TimeOnly?>("OpenTime")
+                        .HasColumnType("time(6)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("BusinessHourId");
+
+                    b.HasIndex("TenantId", "DayOfWeek")
+                        .IsUnique();
+
+                    b.ToTable("BusinessHours", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Category", b =>
+                {
+                    b.Property<Guid>("CategoryId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("CategoryName")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("varchar(150)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("longtext");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("CategoryId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TenantId", "CategoryName")
+                        .IsUnique();
+
+                    b.ToTable("Categories", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Comment", b =>
+                {
+                    b.Property<Guid>("CommentId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Content")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("CommentId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("Comments", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Notification", b =>
+                {
+                    b.Property<Guid>("NotificationId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<bool>("IsRead")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<int>("Type")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("NotificationId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("UserId", "IsRead");
+
+                    b.ToTable("Notifications", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Plan", b =>
+                {
+                    b.Property<Guid>("PlanId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
+
+                    b.Property<int>("RateLimitPerMinute")
+                        .HasColumnType("int");
+
+                    b.HasKey("PlanId");
+
+                    b.HasIndex("Name")
+                        .IsUnique();
+
+                    b.ToTable("Plans", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Sla", b =>
+                {
+                    b.Property<Guid>("SlaId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<int>("Priority")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ResolutionTime")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ResponseTime")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("SlaId");
+
+                    b.HasIndex("TenantId", "Priority")
+                        .IsUnique();
+
+                    b.ToTable("Slas", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Tenant", b =>
+                {
+                    b.Property<Guid>("TenantId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<Guid>("PlanId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Subdomain")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
+
+                    b.Property<string>("TenantName")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("varchar(150)");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("TenantId");
+
+                    b.HasIndex("PlanId");
+
+                    b.HasIndex("Subdomain")
+                        .IsUnique();
+
+                    b.ToTable("Tenants", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Ticket", b =>
+                {
+                    b.Property<Guid>("TicketId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid?>("AssignedTo")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("CategoryId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("CreatedBy")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("longtext");
+
+                    b.Property<Guid>("SlaId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("TicketId");
+
+                    b.HasIndex("AssignedTo");
+
+                    b.HasIndex("CategoryId");
+
+                    b.HasIndex("CreatedBy");
+
+                    b.HasIndex("SlaId");
+
+                    b.HasIndex("Status");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("Tickets", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.TicketFeedback", b =>
+                {
+                    b.Property<Guid>("TicketFeedbackId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Comment")
+                        .HasMaxLength(1000)
+                        .HasColumnType("varchar(1000)");
+
+                    b.Property<int>("Rating")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("SubmittedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("TicketFeedbackId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId")
+                        .IsUnique();
+
+                    b.ToTable("TicketFeedbacks", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.User", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("varchar(256)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<string>("MicrosoftUserId")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<string>("PasswordHash")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("UserId");
+
+                    b.HasIndex("TenantId", "Email")
+                        .IsUnique();
+
+                    b.ToTable("Users", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Attachment", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Comment", null)
+                        .WithMany()
+                        .HasForeignKey("CommentId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Ticket", null)
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("UploadedBy")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.BusinessHour", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Category", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Comment", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Ticket", null)
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Notification", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Ticket", "Ticket")
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("TenantDesk.Domain.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+
+                    b.Navigation("Ticket");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Sla", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Tenant", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Plan", "Plan")
+                        .WithMany()
+                        .HasForeignKey("PlanId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Plan");
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Ticket", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("AssignedTo")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("TenantDesk.Domain.Entities.Category", null)
+                        .WithMany()
+                        .HasForeignKey("CategoryId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("CreatedBy")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Sla", "Sla")
+                        .WithMany()
+                        .HasForeignKey("SlaId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Sla");
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.TicketFeedback", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Ticket", null)
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.User", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+#pragma warning restore 612, 618
+        }
+    }
+}
+===== ./TenantDesk.Infrastructure/Migrations/AppDbContextModelSnapshot.cs =====
 ﻿// <auto-generated />
 using System;
 using Microsoft.EntityFrameworkCore;
@@ -3492,6 +5649,10 @@ namespace TenantDesk.Infrastructure.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("varchar(200)");
 
+                    b.Property<string>("PasswordHash")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
                     b.Property<int>("Role")
                         .HasColumnType("int");
 
@@ -3643,7 +5804,7 @@ namespace TenantDesk.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("TenantDesk.Domain.Entities.Sla", null)
+                    b.HasOne("TenantDesk.Domain.Entities.Sla", "Sla")
                         .WithMany()
                         .HasForeignKey("SlaId")
                         .OnDelete(DeleteBehavior.Restrict)
@@ -3654,6 +5815,8 @@ namespace TenantDesk.Infrastructure.Migrations
                         .HasForeignKey("TenantId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.Navigation("Sla");
                 });
 
             modelBuilder.Entity("TenantDesk.Domain.Entities.TicketFeedback", b =>
@@ -4224,6 +6387,615 @@ namespace TenantDesk.Infrastructure.Migrations
 
             migrationBuilder.DropTable(
                 name: "Plans");
+        }
+    }
+}
+===== ./TenantDesk.Infrastructure/Migrations/20260902045928_AddPasswordHashToUsers.Designer.cs =====
+﻿// <auto-generated />
+using System;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using TenantDesk.Infrastructure.Data;
+
+#nullable disable
+
+namespace TenantDesk.Infrastructure.Migrations
+{
+    [DbContext(typeof(AppDbContext))]
+    [Migration("20260902045928_AddPasswordHashToUsers")]
+    partial class AddPasswordHashToUsers
+    {
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
+        {
+#pragma warning disable 612, 618
+            modelBuilder
+                .HasAnnotation("ProductVersion", "9.0.19")
+                .HasAnnotation("Relational:MaxIdentifierLength", 64);
+
+            MySqlModelBuilderExtensions.AutoIncrementColumns(modelBuilder);
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Attachment", b =>
+                {
+                    b.Property<Guid>("AttachmentId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid?>("CommentId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<long>("FileSize")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("StoragePath")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("UploadedBy")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("AttachmentId");
+
+                    b.HasIndex("CommentId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("UploadedBy");
+
+                    b.ToTable("Attachments", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.BusinessHour", b =>
+                {
+                    b.Property<Guid>("BusinessHourId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<TimeOnly?>("CloseTime")
+                        .HasColumnType("time(6)");
+
+                    b.Property<int>("DayOfWeek")
+                        .HasColumnType("int");
+
+                    b.Property<TimeOnly?>("OpenTime")
+                        .HasColumnType("time(6)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("BusinessHourId");
+
+                    b.HasIndex("TenantId", "DayOfWeek")
+                        .IsUnique();
+
+                    b.ToTable("BusinessHours", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Category", b =>
+                {
+                    b.Property<Guid>("CategoryId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("CategoryName")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("varchar(150)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("longtext");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("CategoryId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TenantId", "CategoryName")
+                        .IsUnique();
+
+                    b.ToTable("Categories", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Comment", b =>
+                {
+                    b.Property<Guid>("CommentId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Content")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("CommentId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("Comments", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Notification", b =>
+                {
+                    b.Property<Guid>("NotificationId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<bool>("IsRead")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("varchar(500)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<int>("Type")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("NotificationId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("UserId", "IsRead");
+
+                    b.ToTable("Notifications", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Plan", b =>
+                {
+                    b.Property<Guid>("PlanId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
+
+                    b.Property<int>("RateLimitPerMinute")
+                        .HasColumnType("int");
+
+                    b.HasKey("PlanId");
+
+                    b.HasIndex("Name")
+                        .IsUnique();
+
+                    b.ToTable("Plans", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Sla", b =>
+                {
+                    b.Property<Guid>("SlaId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<int>("Priority")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ResolutionTime")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ResponseTime")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("SlaId");
+
+                    b.HasIndex("TenantId", "Priority")
+                        .IsUnique();
+
+                    b.ToTable("Slas", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Tenant", b =>
+                {
+                    b.Property<Guid>("TenantId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<Guid>("PlanId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Subdomain")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
+
+                    b.Property<string>("TenantName")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("varchar(150)");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("TenantId");
+
+                    b.HasIndex("PlanId");
+
+                    b.HasIndex("Subdomain")
+                        .IsUnique();
+
+                    b.ToTable("Tenants", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Ticket", b =>
+                {
+                    b.Property<Guid>("TicketId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid?>("AssignedTo")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("CategoryId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("CreatedBy")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("longtext");
+
+                    b.Property<Guid>("SlaId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("TicketId");
+
+                    b.HasIndex("AssignedTo");
+
+                    b.HasIndex("CategoryId");
+
+                    b.HasIndex("CreatedBy");
+
+                    b.HasIndex("SlaId");
+
+                    b.HasIndex("Status");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("Tickets", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.TicketFeedback", b =>
+                {
+                    b.Property<Guid>("TicketFeedbackId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Comment")
+                        .HasMaxLength(1000)
+                        .HasColumnType("varchar(1000)");
+
+                    b.Property<int>("Rating")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("SubmittedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("char(36)");
+
+                    b.HasKey("TicketFeedbackId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId")
+                        .IsUnique();
+
+                    b.ToTable("TicketFeedbacks", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.User", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("varchar(256)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<string>("MicrosoftUserId")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)");
+
+                    b.Property<string>("PasswordHash")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("UserId");
+
+                    b.HasIndex("TenantId", "Email")
+                        .IsUnique();
+
+                    b.ToTable("Users", (string)null);
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Attachment", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Comment", null)
+                        .WithMany()
+                        .HasForeignKey("CommentId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Ticket", null)
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("UploadedBy")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.BusinessHour", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Category", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Comment", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Ticket", null)
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Notification", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Ticket", "Ticket")
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("TenantDesk.Domain.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+
+                    b.Navigation("Ticket");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Sla", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Tenant", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Plan", "Plan")
+                        .WithMany()
+                        .HasForeignKey("PlanId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Plan");
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.Ticket", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("AssignedTo")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("TenantDesk.Domain.Entities.Category", null)
+                        .WithMany()
+                        .HasForeignKey("CategoryId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("CreatedBy")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Sla", null)
+                        .WithMany()
+                        .HasForeignKey("SlaId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.TicketFeedback", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("TenantDesk.Domain.Entities.Ticket", null)
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("TenantDesk.Domain.Entities.User", b =>
+                {
+                    b.HasOne("TenantDesk.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+#pragma warning restore 612, 618
         }
     }
 }
@@ -4829,6 +7601,29 @@ namespace TenantDesk.Infrastructure.Migrations
                     b.Navigation("Tenant");
                 });
 #pragma warning restore 612, 618
+        }
+    }
+}
+===== ./TenantDesk.Infrastructure/Migrations/20260903064859_AddTicketSlaNavigation.cs =====
+﻿using Microsoft.EntityFrameworkCore.Migrations;
+
+#nullable disable
+
+namespace TenantDesk.Infrastructure.Migrations
+{
+    /// <inheritdoc />
+    public partial class AddTicketSlaNavigation : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder)
+        {
+
+        }
+
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder)
+        {
+
         }
     }
 }
