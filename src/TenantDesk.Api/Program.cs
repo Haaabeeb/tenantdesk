@@ -8,6 +8,7 @@ using TenantDesk.Application.Services;
 using TenantDesk.Infrastructure.Repositories;
 using TenantDesk.Infrastructure.Identity;
 using TenantDesk.Infrastructure.Services;
+using TenantDesk.Infrastructure.BackgroundServices;
 using TenantDesk.Api.Middleware;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
@@ -39,7 +40,6 @@ builder.Services.AddScoped<IPlanRepository, PlanRepository>();
 builder.Services.AddScoped<PlanService>();
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<TenantService>();
-// --- end Phase 2 ---
 
 
 builder.Services.AddScoped<ISlaRepository, SlaRepository>();
@@ -49,11 +49,19 @@ builder.Services.AddScoped<IBusinessHourRepository, BusinessHourRepository>();
 builder.Services.AddScoped<BusinessHourService>();
 
 builder.Services.AddScoped<IDateTimeProvider, DateTimeProvider>();
+builder.Services.AddSingleton<IBusinessTimeCalculator, BusinessTimeCalculator>();
 builder.Services.AddScoped<ISlaCalculatorService, SlaCalculatorService>();
 
 builder.Services.AddScoped<INotificationRepository, NotificationRepository>();
 builder.Services.AddScoped<INotificationDispatcher, NotificationDispatcher>();
 builder.Services.AddScoped<IEmailService, EmailService>();
+
+builder.Services.AddScoped<INotificationRepository, NotificationRepository>();
+builder.Services.AddScoped<NotificationService>();
+builder.Services.AddScoped<INotificationDispatcher, NotificationDispatcher>();
+builder.Services.AddScoped<IEmailService, EmailService>();
+
+builder.Services.AddHostedService<NotificationCleanupJob>();
 
 
 builder.Services.AddHttpContextAccessor();

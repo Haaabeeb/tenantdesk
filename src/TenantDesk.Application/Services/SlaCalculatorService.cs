@@ -9,24 +9,22 @@ public class SlaCalculatorService : ISlaCalculatorService
     private readonly ITicketRepository _ticketRepository;
     private readonly ISlaRepository _slaRepository;
     private readonly IBusinessHourRepository _businessHourRepository;
+    private readonly IBusinessTimeCalculator _businessTimeCalculator;
     private readonly IDateTimeProvider _dateTimeProvider;
 
-    private const int MaxDaySearchWindow = 365;
-
-    public SlaCalculatorService(ITicketRepository ticketRepository,ISlaRepository slaRepository,IBusinessHourRepository businessHourRepository,IDateTimeProvider dateTimeProvider)
+    public SlaCalculatorService(ITicketRepository ticketRepository,ISlaRepository slaRepository,IBusinessHourRepository businessHourRepository,IBusinessTimeCalculator businessTimeCalculator,IDateTimeProvider dateTimeProvider)
     {
         _ticketRepository = ticketRepository;
         _slaRepository = slaRepository;
         _businessHourRepository = businessHourRepository;
+        _businessTimeCalculator = businessTimeCalculator;
         _dateTimeProvider = dateTimeProvider;
     }
 
     public async Task<DateTime> CalculateResponseDueAsync(Guid ticketId)
     {
         var ticket = await GetTicketOrThrowAsync(ticketId);
-        var sla = await GetSlaOrThrowAsync(ticket);
-
-        return await CalculateDueDateAsync(ticket, sla.ResponseTime);
+        return await CalculateResponseDueInternalAsync(ticket);
     }
 
     public async Task<DateTime> CalculateResolutionDueAsync(Guid ticketId)
@@ -35,6 +33,7 @@ public class SlaCalculatorService : ISlaCalculatorService
         return await CalculateResolutionDueInternalAsync(ticket);
     }
 
+  
     public async Task<bool> IsBreachedAsync(Guid ticketId)
     {
         var ticket = await GetTicketOrThrowAsync(ticketId);
@@ -47,60 +46,39 @@ public class SlaCalculatorService : ISlaCalculatorService
         return comparisonTime > resolutionDue;
     }
 
+
+    public async Task<bool> IsResponseBreachedAsync(Guid ticketId)
+    {
+        var ticket = await GetTicketOrThrowAsync(ticketId);
+        var responseDue = await CalculateResponseDueInternalAsync(ticket);
+
+        var comparisonTime = ticket.Status == TicketStatus.Open
+            ? _dateTimeProvider.UtcNow
+            : ticket.UpdatedAt;
+
+        return comparisonTime > responseDue;
+    }
+
+    private async Task<DateTime> CalculateResponseDueInternalAsync(Ticket ticket)
+    {
+        var sla = await GetSlaOrThrowAsync(ticket);
+        var businessHours = await _businessHourRepository.GetByTenantAsync(ticket.TenantId);
+
+        return _businessTimeCalculator.CalculateDueDate(
+            ticket.CreatedAt,
+            sla.ResponseTime,
+            businessHours);
+    }
+
     private async Task<DateTime> CalculateResolutionDueInternalAsync(Ticket ticket)
     {
         var sla = await GetSlaOrThrowAsync(ticket);
-        return await CalculateDueDateAsync(ticket, sla.ResolutionTime);
-    }
-
-    private async Task<DateTime> CalculateDueDateAsync(Ticket ticket, int minutesToAllocate)
-    {
         var businessHours = await _businessHourRepository.GetByTenantAsync(ticket.TenantId);
 
-        var workingDaysMap = businessHours
-            .Where(b => b.IsWorkingDay)
-            .ToDictionary(b => b.DayOfWeek);
-
-        if (workingDaysMap.Count == 0)
-            return ticket.CreatedAt.AddMinutes(minutesToAllocate);
-
-        var currentPointer = ticket.CreatedAt;
-        var remainingTime = TimeSpan.FromMinutes(minutesToAllocate);
-
-        for (var i = 0; i < MaxDaySearchWindow; i++)
-        {
-            if (!workingDaysMap.TryGetValue(currentPointer.DayOfWeek, out var todayHours))
-            {
-                currentPointer = currentPointer.Date.AddDays(1);
-                continue;
-            }
-
-            var openTime = todayHours.OpenTime!.Value.ToTimeSpan();
-            var closeTime = todayHours.CloseTime!.Value.ToTimeSpan();
-            var currentTimeOfDay = currentPointer.TimeOfDay;
-
-            if (currentTimeOfDay < openTime)
-            {
-                currentPointer = currentPointer.Date.Add(openTime);
-                currentTimeOfDay = openTime;
-            }
-
-            if (currentTimeOfDay >= closeTime)
-            {
-                currentPointer = currentPointer.Date.AddDays(1);
-                continue;
-            }
-
-            var availableTimeToday = closeTime - currentTimeOfDay;
-
-            if (remainingTime <= availableTimeToday)
-                return currentPointer.Add(remainingTime);
-
-            remainingTime -= availableTimeToday;
-            currentPointer = currentPointer.Date.AddDays(1);
-        }
-
-        throw new InvalidOperationException("Could not calculate SLA due date within the maximum search window (365 days). Check the tenant's business hour configuration.");
+        return _businessTimeCalculator.CalculateDueDate(
+            ticket.CreatedAt,
+            sla.ResolutionTime,
+            businessHours);
     }
 
     private async Task<Ticket> GetTicketOrThrowAsync(Guid ticketId)
@@ -118,9 +96,11 @@ public class SlaCalculatorService : ISlaCalculatorService
         if (sla is null)
             throw new KeyNotFoundException($"SLA '{ticket.SlaId}' referenced by ticket '{ticket.TicketId}' was not found.");
 
+        if (sla.TenantId != ticket.TenantId)
+            throw new InvalidOperationException($"SLA '{sla.SlaId}' does not belong to the same tenant as Ticket '{ticket.TicketId}'.");
+
         return sla;
     }
-    
 
 
 }

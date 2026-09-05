@@ -10,7 +10,7 @@ public class BusinessHourRepository : IBusinessHourRepository
 {
     private readonly AppDbContext _context;
 
-     public BusinessHourRepository(AppDbContext context)
+        public BusinessHourRepository(AppDbContext context)
         {
             _context = context;
         }

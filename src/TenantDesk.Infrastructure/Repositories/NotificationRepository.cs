@@ -7,17 +7,15 @@ using TenantDesk.Infrastructure.Data;
 
 namespace TenantDesk.Infrastructure.Repositories;
 
-public class NotificationRepository : INotificationRepository
+public class NotificationRepository(AppDbContext context) : INotificationRepository
 {
-    private readonly AppDbContext _context;
-
-    public NotificationRepository(AppDbContext context)
-    {
-        _context = context;
-    }
+    private readonly AppDbContext _context = context;
 
     public async Task<Notification?> GetByIdAsync(Guid id) =>
         await _context.Notifications.FirstOrDefaultAsync(n => n.NotificationId == id);
+
+    public async Task<int> CountUnreadByUserAsync(Guid userId) =>
+        await _context.Notifications.CountAsync(n => n.UserId == userId && !n.IsRead);
 
     public async Task AddAsync(Notification notification)
     {
@@ -25,20 +23,69 @@ public class NotificationRepository : INotificationRepository
         await _context.SaveChangesAsync();
     }
 
-    public Task<int> CountUnreadByUserAsync(Guid userId) =>
-        Task.FromResult(0);
+    public async Task MarkAsReadAsync(Guid id)
+    {
+        var notification = await GetByIdAsync(id);
+        if (notification is not null)
+        {
+            notification.MarkAsRead();
+            await _context.SaveChangesAsync();
+        }
+    }
 
-    public Task MarkAsReadAsync(Guid id) =>
-        Task.CompletedTask;
+    public async Task MarkAllAsReadAsync(Guid userId)
+    {
+        var unread = await _context.Notifications
+            .Where(n => n.UserId == userId && !n.IsRead)
+            .ToListAsync();
 
-    public Task MarkAllAsReadAsync(Guid userId) =>
-        Task.CompletedTask;
+        foreach (var notification in unread)
+        {
+            notification.MarkAsRead();
+        }
 
-    public Task DeleteOldNotificationsAsync(Guid tenantId, DateTime olderThan) =>
-        Task.CompletedTask;
+        if (unread.Count > 0)
+        {
+            await _context.SaveChangesAsync();
+        }
+    }
 
-    public Task<PagedResult<Notification>> GetFilteredAsync(NotificationFilter filter) =>
-        throw new NotImplementedException("Phase 11: NotificationsController query side.");
+    public async Task DeleteOldNotificationsAsync(Guid tenantId, DateTime olderThan)
+    {
+        var oldNotifications = await _context.Notifications
+            .Where(n => n.TenantId == tenantId && n.CreatedAt < olderThan)
+            .ToListAsync();
 
+        if (oldNotifications.Count > 0)
+        {
+            _context.Notifications.RemoveRange(oldNotifications);
+            await _context.SaveChangesAsync();
+        }
+    }
 
+    public async Task<PagedResult<Notification>> GetFilteredAsync(NotificationFilter filter)
+    {
+        var query = _context.Notifications
+            .AsNoTracking()
+            .Where(n => n.TenantId == filter.TenantId && n.UserId == filter.UserId);
+
+        if (filter.UnreadOnly == true)
+            query = query.Where(n => !n.IsRead);
+
+        query = query.OrderByDescending(n => n.CreatedAt);
+
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip((filter.Page - 1) * filter.PageSize)
+            .Take(filter.PageSize)
+            .ToListAsync();
+
+        return new PagedResult<Notification>
+        {
+            Items = items,
+            TotalCount = total,
+            Page = filter.Page,
+            PageSize = filter.PageSize
+        };
+    }
 }
