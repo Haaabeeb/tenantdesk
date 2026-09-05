@@ -68,13 +68,14 @@ builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<TenantService>();
 // --- end Phase 2 ---
 builder.Services.AddScoped<ITicketRepository, TicketRepository>();
-
+builder.Services.AddScoped<ICommentRepository, CommentRepository>();
+builder.Services.AddScoped<CommentService>();
 builder.Services.AddScoped<ISlaRepository, SlaRepository>();
 builder.Services.AddScoped<SlaService>();
 builder.Services.AddScoped<TicketService>();
 builder.Services.AddScoped<IBusinessHourRepository, BusinessHourRepository>();
 builder.Services.AddScoped<BusinessHourService>();
-
+builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 builder.Services.AddScoped<IDateTimeProvider, DateTimeProvider>();
 builder.Services.AddScoped<ISlaCalculatorService, SlaCalculatorService>();
 

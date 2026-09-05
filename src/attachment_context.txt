@@ -1,0 +1,2070 @@
+===== TenantDesk.Domain/Entities/Attachment.cs =====
+using System;
+
+namespace TenantDesk.Domain.Entities
+{
+    public class Attachment
+    {
+        public Guid AttachmentId { get; private set; }
+        public Guid TenantId { get; private set; }
+        public Guid TicketId { get; private set; }
+        public Guid? CommentId { get; private set; }
+        public Guid UploadedBy { get; private set; }
+        public string StoragePath { get; private set; }
+        public string FileName { get; private set; }
+        public long FileSize { get; private set; }
+        public DateTime CreatedAt { get; private set; }
+
+        // For EF Core
+        private Attachment() { }
+
+        public Attachment(Guid tenantId, Guid ticketId, Guid? commentId, Guid uploadedBy,
+                           string storagePath, string fileName, long fileSize)
+        {
+            if (string.IsNullOrWhiteSpace(storagePath))
+                throw new ArgumentException("Storage path is required.", nameof(storagePath));
+
+            if (string.IsNullOrWhiteSpace(fileName))
+                throw new ArgumentException("File name is required.", nameof(fileName));
+
+            if (fileSize <= 0)
+                throw new ArgumentException("File size must be greater than 0.", nameof(fileSize));
+
+            AttachmentId = Guid.NewGuid();
+            TenantId = tenantId;
+            TicketId = ticketId;
+            CommentId = commentId;
+            UploadedBy = uploadedBy;
+            StoragePath = storagePath;
+            FileName = fileName;
+            FileSize = fileSize;
+            CreatedAt = DateTime.UtcNow;
+        }
+    }
+}
+
+===== TenantDesk.Infrastructure/Configuration/AttachmentConfiguration.cs =====
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Infrastructure.Configurations;
+
+public class AttachmentConfiguration : IEntityTypeConfiguration<Attachment>
+{
+    public void Configure(EntityTypeBuilder<Attachment> builder)
+    {
+        builder.ToTable("Attachments");
+
+        builder.HasKey(a => a.AttachmentId);
+
+        builder.Property(a => a.StoragePath)
+            .IsRequired()
+            .HasMaxLength(500);
+
+        builder.Property(a => a.FileName)
+            .IsRequired()
+            .HasMaxLength(255);
+
+        builder.Property(a => a.FileSize)
+            .IsRequired();
+
+        builder.Property(a => a.CreatedAt)
+            .IsRequired();
+
+        builder.HasOne<Tenant>()
+            .WithMany()
+            .HasForeignKey(a => a.TenantId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Ticket>()
+            .WithMany()
+            .HasForeignKey(a => a.TicketId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Comment>()
+            .WithMany()
+            .HasForeignKey(a => a.CommentId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(a => a.UploadedBy)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasIndex(a => a.TenantId);
+
+        builder.HasIndex(a => a.TicketId);
+
+        builder.HasIndex(a => a.CommentId);
+
+        builder.HasIndex(a => a.UploadedBy);
+    }
+}
+
+===== TenantDesk.Application/Interfaces/Persistence/IAttachementRepository.cs =====
+
+using System.Net.Mail;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Attachment;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+
+public interface IAttachementRepository{
+    
+    public Task<Attachment> GetIdByAsync(Guid id);
+    public Task<long> GetTotalSizeByTenantAsync(Guid tenantId);
+    public Task<long> GetTotalSizeByTicketAsync(Guid ticketId);
+    public Task AddAsync(Attachment attachment);
+    public Task DeleteAsync();
+    public Task ExistsAsync();
+    Task<PagedResult<Attachment>> GetFilteredAsync(AttachmentFilter filter);
+}
+
+===== TenantDesk.Application/Interfaces/Persistence/Filters/AttachmentFilter.cs =====
+using TenantDesk.Application.Common;
+
+namespace TenantDesk.Application.Interfaces.Persistence.Filters;
+
+public class AttachmentFilter : PagedFilter
+{
+    public Guid? TicketId { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid? CommentId { get; set; }
+    public Guid? UploadedBy { get; set; }
+}
+
+===== TenantDesk.Application/Dto/Attachment/CreateAttachmentDto.cs =====
+namespace TenantDesk.Application.Dto.Attachment;
+
+// Used with: POST /api/tickets/{ticketId}/attachments
+// TicketId comes from the route; UploadedBy comes from the authenticated user's context.
+public record CreateAttachmentDto(
+    Guid? CommentId,
+    string StoragePath,
+    string FileName,
+    long FileSize
+);
+
+
+===== TenantDesk.Application/Dto/Attachment/AttachmentResponseDto.cs =====
+namespace TenantDesk.Application.Dto.Attachment;
+
+// Returned from: GET/POST /api/tickets/{ticketId}/attachments
+public record AttachmentResponseDto(
+    Guid AttachmentId,
+    Guid TicketId,
+    Guid? CommentId,
+    Guid UploadedBy,
+    string FileName,
+    long FileSize,
+    DateTime CreatedAt
+);
+
+
+===== TenantDesk.Application/Interfaces/Services/IFileStorageService.cs =====
+using System.ComponentModel.DataAnnotations;
+
+public interface IFileStorageService
+{
+    public Task UploadAsync (Stream file, string fileName);
+    public Task <Stream> DownloadAsync(string storagePath);
+    public Task DeleteAsync(string storagePath);
+    public Task <String>GetPublicUrlAsync(string storagePath);
+    public Task<bool>ExistsAsync(string storagePath);
+
+
+}
+
+===== TenantDesk.Infrastructure/Repositories/CommentRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class CommentRepository(AppDbContext _context) : ICommentRepository
+{
+    public Task<Comment?> GetByIdAsync(Guid id) =>
+        _context.Comments.FirstOrDefaultAsync(c => c.CommentId == id);
+
+    public Task<int> CountByTicketAsync(Guid ticketId) =>
+        _context.Comments.CountAsync(c => c.TicketId == ticketId);
+
+    public async Task<PagedResult<Comment>> GetFilteredAsync(CommentFilter filter)
+    {
+        var query = _context.Comments.Where(c => c.TenantId == filter.TenantId);
+
+        if (filter.TicketId is not null)
+            query = query.Where(c => c.TicketId == filter.TicketId);
+
+        if (filter.UserId is not null)
+            query = query.Where(c => c.UserId == filter.UserId);
+
+        query = query.OrderByDescending(c => c.CreatedAt);
+
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip((filter.Page - 1) * filter.PageSize)
+            .Take(filter.PageSize)
+            .ToListAsync();
+
+        return new PagedResult<Comment>
+        {
+            Items = items,
+            TotalCount = total,
+            Page = filter.Page,
+            PageSize = filter.PageSize
+        };
+    }
+
+    public async Task AddAsync(Comment comment)
+    {
+        await _context.Comments.AddAsync(comment);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(Comment comment)
+    {
+        _context.Comments.Update(comment);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var comment = await GetByIdAsync(id);
+        if (comment is not null)
+        {
+            _context.Comments.Remove(comment);
+            await _context.SaveChangesAsync();
+        }
+    }
+}
+
+===== TenantDesk.Application/Services/CommentService.cs =====
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Mapping;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class CommentService(
+    ICommentRepository _commentRepository,
+    ITicketRepository _ticketRepository,
+    ICurrentTenantService _currentTenantService,
+    ICurrentUserService _currentUserService)
+{
+    public async Task<CommentResponseDto> CreateAsync(Guid ticketId, CreateCommentDto dto)
+    {
+        await EnsureCanAccessTicketAsync(ticketId);
+
+        var tenantId = _currentTenantService.GetTenantId();
+        var userId = _currentUserService.GetUserId();
+
+        var comment = new Comment(tenantId, ticketId, userId, dto.Content);
+
+        await _commentRepository.AddAsync(comment);
+
+        return comment.ToDto();
+    }
+
+    public async Task<PagedResult<CommentResponseDto>> GetByTicketAsync(Guid ticketId, CommentFilter filter)
+    {
+        await EnsureCanAccessTicketAsync(ticketId);
+
+        filter.TenantId = _currentTenantService.GetTenantId();
+        filter.TicketId = ticketId;
+
+        var result = await _commentRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<CommentResponseDto>
+        {
+            Items = result.Items.Select(c => c.ToDto()).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<CommentResponseDto> UpdateAsync(Guid id, UpdateCommentDto dto)
+    {
+        var comment = await GetOwnedCommentAsync(id);
+
+        var userId = _currentUserService.GetUserId();
+        if (comment.UserId != userId)
+            throw new UnauthorizedAccessException("You can only edit your own comments.");
+
+        comment.UpdateContent(dto.Content);
+
+        await _commentRepository.UpdateAsync(comment);
+
+        return comment.ToDto();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var comment = await GetOwnedCommentAsync(id);
+
+        var userId = _currentUserService.GetUserId();
+        var role = _currentUserService.GetUserRole();
+
+        if (comment.UserId != userId && role != UserRole.Admin)
+            throw new UnauthorizedAccessException("You can only delete your own comments.");
+
+        await _commentRepository.DeleteAsync(id);
+    }
+
+    
+    private async Task<Comment> GetOwnedCommentAsync(Guid id)
+    {
+        var comment = await _commentRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Comment with ID '{id}' not found.");
+
+        if (comment.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access comments from another tenant.");
+
+        return comment;
+    }
+
+
+    private async Task EnsureCanAccessTicketAsync(Guid ticketId)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(ticketId)
+            ?? throw new KeyNotFoundException($"Ticket with ID '{ticketId}' not found.");
+
+        if (ticket.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access tickets from another tenant.");
+
+        var role = _currentUserService.GetUserRole();
+        var userId = _currentUserService.GetUserId();
+
+        if (role == UserRole.Customer && ticket.CreatedBy != userId)
+            throw new UnauthorizedAccessException("You cannot access a ticket you did not create.");
+
+        if (role == UserRole.Agent && ticket.AssignedTo != userId)
+            throw new UnauthorizedAccessException("You can only access tickets assigned to you.");
+
+        // Admin: no additional restriction.
+    }
+}
+
+===== TenantDesk.Api/Controllers/CommentsController.cs =====
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+public class CommentsController(CommentService _commentService) : ControllerBase
+{
+    // POST: api/tickets/{ticketId}/comments
+    [HttpPost("api/tickets/{ticketId:guid}/comments")]
+    public async Task<ActionResult<CommentResponseDto>> Create(Guid ticketId, CreateCommentDto dto)
+    {
+        var comment = await _commentService.CreateAsync(ticketId, dto);
+
+        return Ok(comment);
+    }
+
+    // GET: api/tickets/{ticketId}/comments?page=1&pageSize=20
+    [HttpGet("api/tickets/{ticketId:guid}/comments")]
+    public async Task<ActionResult<PagedResult<CommentResponseDto>>> GetByTicket(
+        Guid ticketId,
+        [FromQuery] CommentFilter filter)
+    {
+        var result = await _commentService.GetByTicketAsync(ticketId, filter);
+
+        return Ok(result);
+    }
+
+    // PUT: api/comments/{id}
+    [HttpPut("api/comments/{id:guid}")]
+    public async Task<ActionResult<CommentResponseDto>> Update(Guid id, UpdateCommentDto dto)
+    {
+        var comment = await _commentService.UpdateAsync(id, dto);
+
+        return Ok(comment);
+    }
+
+    // DELETE: api/comments/{id}
+    [HttpDelete("api/comments/{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _commentService.DeleteAsync(id);
+
+        return NoContent();
+    }
+}
+
+===== TenantDesk.Application/Mapping/CommentMapperExtensions.cs =====
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Mapping;
+
+public static class CommentMapperExtensions
+{
+    public static CommentResponseDto ToDto(this Comment comment)
+    {
+        return new CommentResponseDto(
+            comment.CommentId,
+            comment.TicketId,
+            comment.UserId,
+            comment.Content,
+            comment.CreatedAt
+        );
+    }
+}
+
+===== TenantDesk.Infrastructure/Repositories/TicketRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class TicketRepository(AppDbContext _context) : ITicketRepository
+{
+    public Task<Ticket?> GetByIdAsync(Guid id) =>
+        _context.Tickets.FirstOrDefaultAsync(t => t.TicketId == id);
+
+    public Task<bool> ExistsAsync(Guid id) =>
+        _context.Tickets.AnyAsync(t => t.TicketId == id);
+
+    public Task<int> CountByStatusAsync(Guid tenantId, TicketStatus status) =>
+        _context.Tickets.CountAsync(t => t.TenantId == tenantId && t.Status == status);
+
+    public Task<int> CountAssignedToUserAsync(Guid userId) =>
+        _context.Tickets.CountAsync(t => t.AssignedTo == userId);
+
+    public Task<int> CountByTenantAsync(Guid tenantId) =>
+        _context.Tickets.CountAsync(t => t.TenantId == tenantId);
+
+    public async Task<PagedResult<Ticket>> GetFilteredAsync(TicketFilter filter)
+    {
+        var query = _context.Tickets.Where(t => t.TenantId == filter.TenantId);
+
+        if (filter.Status is not null)
+            query = query.Where(t => t.Status == filter.Status);
+
+        if (filter.Priority is not null)
+            query = query.Where(t => t.Sla.Priority == filter.Priority);
+
+        if (filter.CategoryId is not null)
+            query = query.Where(t => t.CategoryId == filter.CategoryId);
+
+        if (filter.AssignedTo is not null)
+            query = query.Where(t => t.AssignedTo == filter.AssignedTo);
+
+        if (filter.CreatedBy is not null)
+            query = query.Where(t => t.CreatedBy == filter.CreatedBy);
+
+        if (filter.UnassignedOnly == true)
+            query = query.Where(t => t.AssignedTo == null);
+
+        if (!string.IsNullOrWhiteSpace(filter.SearchKeyword))
+        {
+            var keyword = filter.SearchKeyword.Trim();
+            query = query.Where(t =>
+                t.Title.Contains(keyword) ||
+                (t.Description != null && t.Description.Contains(keyword)));
+        }
+
+        query = filter.SortBy switch
+        {
+            "Title" => filter.SortDescending ? query.OrderByDescending(t => t.Title) : query.OrderBy(t => t.Title),
+            "Status" => filter.SortDescending ? query.OrderByDescending(t => t.Status) : query.OrderBy(t => t.Status),
+            "UpdatedAt" => filter.SortDescending ? query.OrderByDescending(t => t.UpdatedAt) : query.OrderBy(t => t.UpdatedAt),
+            _ => filter.SortDescending ? query.OrderByDescending(t => t.CreatedAt) : query.OrderBy(t => t.CreatedAt)
+        };
+
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip((filter.Page - 1) * filter.PageSize)
+            .Take(filter.PageSize)
+            .ToListAsync();
+
+        return new PagedResult<Ticket>
+        {
+            Items = items,
+            TotalCount = total,
+            Page = filter.Page,
+            PageSize 
+
+= filter.PageSize
+        };
+    }
+
+    public async Task AddAsync(Ticket ticket)
+    {
+        await _context.Tickets.AddAsync(ticket);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(Ticket ticket)
+    {
+        _context.Tickets.Update(ticket);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var ticket = await GetByIdAsync(id);
+        if (ticket is not null)
+        {
+            _context.Tickets.Remove(ticket);
+            await _context.SaveChangesAsync();
+        }
+    }
+}
+
+===== TenantDesk.Application/Services/Ticketservice.cs =====
+using AutoMapper;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Ticket;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class TicketService(
+    ITicketRepository _ticketRepository,
+    ICategoryRepository _categoryRepository,
+    ISlaRepository _slaRepository,
+    ICurrentTenantService _currentTenantService,
+    ICurrentUserService _currentUserService,
+    INotificationDispatcher _notificationDispatcher,
+    IMapper _mapper)
+{
+    public async Task<TicketResponseDto> CreateAsync(CreateTicketDto dto)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var userId = _currentUserService.GetUserId();
+
+        var category = await _categoryRepository.GetByIdAsync(dto.CategoryId)
+            ?? throw new KeyNotFoundException($"Category with ID '{dto.CategoryId}' not found.");
+
+        if (category.TenantId != tenantId)
+            throw new UnauthorizedAccessException("You cannot use a category from another tenant.");
+
+        var sla = await _slaRepository.GetByIdAsync(dto.SlaId)
+            ?? throw new KeyNotFoundException($"SLA with ID '{dto.SlaId}' not found.");
+
+        if (sla.TenantId != tenantId)
+            throw new UnauthorizedAccessException("You cannot use an SLA from another tenant.");
+
+        var ticket = new Ticket(tenantId, dto.CategoryId, dto.SlaId, userId, dto.Title, dto.Description);
+
+        await _ticketRepository.AddAsync(ticket);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> GetByIdAsync(Guid id)
+    {
+        var ticket = await GetOwnedTicketAsync(id);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<PagedResult<TicketResponseDto>> GetFilteredAsync(TicketFilter filter)
+    {
+        filter.TenantId = _currentTenantService.GetTenantId();
+
+        // Customers only ever see their own tickets, regardless of what they pass in the query.
+        if (_currentUserService.GetUserRole() == UserRole.Customer)
+            filter.CreatedBy = _currentUserService.GetUserId();
+
+        var result = await _ticketRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<TicketResponseDto>
+        {
+            Items = result.Items.Select(t => _mapper.Map<TicketResponseDto>(t)).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<TicketResponseDto> UpdateDetailsAsync(Guid id, UpdateTicketDto dto)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.UpdateDetails(dto.Title, dto.Description);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' was updated.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> ChangeStatusAsync(Guid id, TicketStatus newStatus)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.ChangeStatus(newStatus);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' status changed to {newStatus}.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> AssignAsync(Guid id, Guid assigneeUserId)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.AssignTo(assigneeUserId);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            assigneeUserId, NotificationType.TicketAssigned, $"You have been assigned ticket '{ticket.Title}'.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> CloseAsync(Guid id)
+    {
+        // Agent/Admin can close any ticket assigned to them; a Customer can only close their own.
+        var ticket = await GetOwnedTicketAsync(id);
+
+        ticket.Close();
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' was closed.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    private async Task<Ticket> GetOwnedTicketAsync(Guid id, bool agentOrAdminOnly = false)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Ticket with ID '{id}' not found.");
+
+        if (ticket.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access tickets from another tenant.");
+
+        var role = _currentUserService.GetUserRole();
+        var userId = _currentUserService.GetUserId();
+
+        if (role == UserRole.Customer)
+        {
+            if (ticket.CreatedBy != userId)
+                throw new UnauthorizedAccessException("You cannot access a ticket you did not create.");
+
+            if (agentOrAdminOnly)
+                throw new UnauthorizedAccessException("Only an agent or admin can perform this action.");
+        }
+        else if (role == UserRole.Agent && agentOrAdminOnly)
+        {
+            // Agent can only modify tickets assigned to them; Admin is exempt from this check entirely.
+            if (ticket.AssignedTo != userId)
+                throw new UnauthorizedAccessException("You can only modify tickets assigned to you.");
+        }
+
+        return ticket;
+    }
+}
+
+===== TenantDesk.Domain/Entities/Attachment.cs =====
+using System;
+
+namespace TenantDesk.Domain.Entities
+{
+    public class Attachment
+    {
+        public Guid AttachmentId { get; private set; }
+        public Guid TenantId { get; private set; }
+        public Guid TicketId { get; private set; }
+        public Guid? CommentId { get; private set; }
+        public Guid UploadedBy { get; private set; }
+        public string StoragePath { get; private set; }
+        public string FileName { get; private set; }
+        public long FileSize { get; private set; }
+        public DateTime CreatedAt { get; private set; }
+
+        // For EF Core
+        private Attachment() { }
+
+        public Attachment(Guid tenantId, Guid ticketId, Guid? commentId, Guid uploadedBy,
+                           string storagePath, string fileName, long fileSize)
+        {
+            if (string.IsNullOrWhiteSpace(storagePath))
+                throw new ArgumentException("Storage path is required.", nameof(storagePath));
+
+            if (string.IsNullOrWhiteSpace(fileName))
+                throw new ArgumentException("File name is required.", nameof(fileName));
+
+            if (fileSize <= 0)
+                throw new ArgumentException("File size must be greater than 0.", nameof(fileSize));
+
+            AttachmentId = Guid.NewGuid();
+            TenantId = tenantId;
+            TicketId = ticketId;
+            CommentId = commentId;
+            UploadedBy = uploadedBy;
+            StoragePath = storagePath;
+            FileName = fileName;
+            FileSize = fileSize;
+            CreatedAt = DateTime.UtcNow;
+        }
+    }
+}
+
+===== TenantDesk.Infrastructure/Configuration/AttachmentConfiguration.cs =====
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Infrastructure.Configurations;
+
+public class AttachmentConfiguration : IEntityTypeConfiguration<Attachment>
+{
+    public void Configure(EntityTypeBuilder<Attachment> builder)
+    {
+        builder.ToTable("Attachments");
+
+        builder.HasKey(a => a.AttachmentId);
+
+        builder.Property(a => a.StoragePath)
+            .IsRequired()
+            .HasMaxLength(500);
+
+        builder.Property(a => a.FileName)
+            .IsRequired()
+            .HasMaxLength(255);
+
+        builder.Property(a => a.FileSize)
+            .IsRequired();
+
+        builder.Property(a => a.CreatedAt)
+            .IsRequired();
+
+        builder.HasOne<Tenant>()
+            .WithMany()
+            .HasForeignKey(a => a.TenantId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Ticket>()
+            .WithMany()
+            .HasForeignKey(a => a.TicketId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Comment>()
+            .WithMany()
+            .HasForeignKey(a => a.CommentId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(a => a.UploadedBy)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasIndex(a => a.TenantId);
+
+        builder.HasIndex(a => a.TicketId);
+
+        builder.HasIndex(a => a.CommentId);
+
+        builder.HasIndex(a => a.UploadedBy);
+    }
+}
+
+===== TenantDesk.Application/Interfaces/Persistence/IAttachementRepository.cs =====
+
+using System.Net.Mail;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Attachment;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+
+public interface IAttachementRepository{
+    
+    public Task<Attachment> GetIdByAsync(Guid id);
+    public Task<long> GetTotalSizeByTenantAsync(Guid tenantId);
+    public Task<long> GetTotalSizeByTicketAsync(Guid ticketId);
+    public Task AddAsync(Attachment attachment);
+    public Task DeleteAsync();
+    public Task ExistsAsync();
+    Task<PagedResult<Attachment>> GetFilteredAsync(AttachmentFilter filter);
+}
+
+===== TenantDesk.Application/Interfaces/Persistence/Filters/AttachmentFilter.cs =====
+using TenantDesk.Application.Common;
+
+namespace TenantDesk.Application.Interfaces.Persistence.Filters;
+
+public class AttachmentFilter : PagedFilter
+{
+    public Guid? TicketId { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid? CommentId { get; set; }
+    public Guid? UploadedBy { get; set; }
+}
+
+===== TenantDesk.Application/Dto/Attachment/CreateAttachmentDto.cs =====
+namespace TenantDesk.Application.Dto.Attachment;
+
+// Used with: POST /api/tickets/{ticketId}/attachments
+// TicketId comes from the route; UploadedBy comes from the authenticated user's context.
+public record CreateAttachmentDto(
+    Guid? CommentId,
+    string StoragePath,
+    string FileName,
+    long FileSize
+);
+
+
+===== TenantDesk.Application/Dto/Attachment/AttachmentResponseDto.cs =====
+namespace TenantDesk.Application.Dto.Attachment;
+
+// Returned from: GET/POST /api/tickets/{ticketId}/attachments
+public record AttachmentResponseDto(
+    Guid AttachmentId,
+    Guid TicketId,
+    Guid? CommentId,
+    Guid UploadedBy,
+    string FileName,
+    long FileSize,
+    DateTime CreatedAt
+);
+
+
+===== TenantDesk.Application/Interfaces/Services/IFileStorageService.cs =====
+using System.ComponentModel.DataAnnotations;
+
+public interface IFileStorageService
+{
+    public Task UploadAsync (Stream file, string fileName);
+    public Task <Stream> DownloadAsync(string storagePath);
+    public Task DeleteAsync(string storagePath);
+    public Task <String>GetPublicUrlAsync(string storagePath);
+    public Task<bool>ExistsAsync(string storagePath);
+
+
+}
+
+===== TenantDesk.Infrastructure/Repositories/CommentRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class CommentRepository(AppDbContext _context) : ICommentRepository
+{
+    public Task<Comment?> GetByIdAsync(Guid id) =>
+        _context.Comments.FirstOrDefaultAsync(c => c.CommentId == id);
+
+    public Task<int> CountByTicketAsync(Guid ticketId) =>
+        _context.Comments.CountAsync(c => c.TicketId == ticketId);
+
+    public async Task<PagedResult<Comment>> GetFilteredAsync(CommentFilter filter)
+    {
+        var query = _context.Comments.Where(c => c.TenantId == filter.TenantId);
+
+        if (filter.TicketId is not null)
+            query = query.Where(c => c.TicketId == filter.TicketId);
+
+        if (filter.UserId is not null)
+            query = query.Where(c => c.UserId == filter.UserId);
+
+        query = query.OrderByDescending(c => c.CreatedAt);
+
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip((filter.Page - 1) * filter.PageSize)
+            .Take(filter.PageSize)
+            .ToListAsync();
+
+        return new PagedResult<Comment>
+        {
+            Items = items,
+            TotalCount = total,
+            Page = filter.Page,
+            PageSize = filter.PageSize
+        };
+    }
+
+    public async Task AddAsync(Comment comment)
+    {
+        await _context.Comments.AddAsync(comment);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(Comment comment)
+    {
+        _context.Comments.Update(comment);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var comment = await GetByIdAsync(id);
+        if (comment is not null)
+        {
+            _context.Comments.Remove(comment);
+            await _context.SaveChangesAsync();
+        }
+    }
+}
+
+===== TenantDesk.Application/Services/CommentService.cs =====
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Mapping;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class CommentService(
+    ICommentRepository _commentRepository,
+    ITicketRepository _ticketRepository,
+    ICurrentTenantService _currentTenantService,
+    ICurrentUserService _currentUserService)
+{
+    public async Task<CommentResponseDto> CreateAsync(Guid ticketId, CreateCommentDto dto)
+    {
+        await EnsureCanAccessTicketAsync(ticketId);
+
+        var tenantId = _currentTenantService.GetTenantId();
+        var userId = _currentUserService.GetUserId();
+
+        var comment = new Comment(tenantId, ticketId, userId, dto.Content);
+
+        await _commentRepository.AddAsync(comment);
+
+        return comment.ToDto();
+    }
+
+    public async Task<PagedResult<CommentResponseDto>> GetByTicketAsync(Guid ticketId, CommentFilter filter)
+    {
+        await EnsureCanAccessTicketAsync(ticketId);
+
+        filter.TenantId = _currentTenantService.GetTenantId();
+        filter.TicketId = ticketId;
+
+        var result = await _commentRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<CommentResponseDto>
+        {
+            Items = result.Items.Select(c => c.ToDto()).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<CommentResponseDto> UpdateAsync(Guid id, UpdateCommentDto dto)
+    {
+        var comment = await GetOwnedCommentAsync(id);
+
+        var userId = _currentUserService.GetUserId();
+        if (comment.UserId != userId)
+            throw new UnauthorizedAccessException("You can only edit your own comments.");
+
+        comment.UpdateContent(dto.Content);
+
+        await _commentRepository.UpdateAsync(comment);
+
+        return comment.ToDto();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var comment = await GetOwnedCommentAsync(id);
+
+        var userId = _currentUserService.GetUserId();
+        var role = _currentUserService.GetUserRole();
+
+        if (comment.UserId != userId && role != UserRole.Admin)
+            throw new UnauthorizedAccessException("You can only delete your own comments.");
+
+        await _commentRepository.DeleteAsync(id);
+    }
+
+    
+    private async Task<Comment> GetOwnedCommentAsync(Guid id)
+    {
+        var comment = await _commentRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Comment with ID '{id}' not found.");
+
+        if (comment.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access comments from another tenant.");
+
+        return comment;
+    }
+
+
+    private async Task EnsureCanAccessTicketAsync(Guid ticketId)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(ticketId)
+            ?? throw new KeyNotFoundException($"Ticket with ID '{ticketId}' not found.");
+
+        if (ticket.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access tickets from another tenant.");
+
+        var role = _currentUserService.GetUserRole();
+        var userId = _currentUserService.GetUserId();
+
+        if (role == UserRole.Customer && ticket.CreatedBy != userId)
+            throw new UnauthorizedAccessException("You cannot access a ticket you did not create.");
+
+        if (role == UserRole.Agent && ticket.AssignedTo != userId)
+            throw new UnauthorizedAccessException("You can only access tickets assigned to you.");
+
+        // Admin: no additional restriction.
+    }
+}
+
+===== TenantDesk.Api/Controllers/CommentsController.cs =====
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+public class CommentsController(CommentService _commentService) : ControllerBase
+{
+    // POST: api/tickets/{ticketId}/comments
+    [HttpPost("api/tickets/{ticketId:guid}/comments")]
+    public async Task<ActionResult<CommentResponseDto>> Create(Guid ticketId, CreateCommentDto dto)
+    {
+        var comment = await _commentService.CreateAsync(ticketId, dto);
+
+        return Ok(comment);
+    }
+
+    // GET: api/tickets/{ticketId}/comments?page=1&pageSize=20
+    [HttpGet("api/tickets/{ticketId:guid}/comments")]
+    public async Task<ActionResult<PagedResult<CommentResponseDto>>> GetByTicket(
+        Guid ticketId,
+        [FromQuery] CommentFilter filter)
+    {
+        var result = await _commentService.GetByTicketAsync(ticketId, filter);
+
+        return Ok(result);
+    }
+
+    // PUT: api/comments/{id}
+    [HttpPut("api/comments/{id:guid}")]
+    public async Task<ActionResult<CommentResponseDto>> Update(Guid id, UpdateCommentDto dto)
+    {
+        var comment = await _commentService.UpdateAsync(id, dto);
+
+        return Ok(comment);
+    }
+
+    // DELETE: api/comments/{id}
+    [HttpDelete("api/comments/{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _commentService.DeleteAsync(id);
+
+        return NoContent();
+    }
+}
+
+===== TenantDesk.Application/Mapping/CommentMapperExtensions.cs =====
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Mapping;
+
+public static class CommentMapperExtensions
+{
+    public static CommentResponseDto ToDto(this Comment comment)
+    {
+        return new CommentResponseDto(
+            comment.CommentId,
+            comment.TicketId,
+            comment.UserId,
+            comment.Content,
+            comment.CreatedAt
+        );
+    }
+}
+
+===== TenantDesk.Infrastructure/Repositories/TicketRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class TicketRepository(AppDbContext _context) : ITicketRepository
+{
+    public Task<Ticket?> GetByIdAsync(Guid id) =>
+        _context.Tickets.FirstOrDefaultAsync(t => t.TicketId == id);
+
+    public Task<bool> ExistsAsync(Guid id) =>
+        _context.Tickets.AnyAsync(t => t.TicketId == id);
+
+    public Task<int> CountByStatusAsync(Guid tenantId, TicketStatus status) =>
+        _context.Tickets.CountAsync(t => t.TenantId == tenantId && t.Status == status);
+
+    public Task<int> CountAssignedToUserAsync(Guid userId) =>
+        _context.Tickets.CountAsync(t => t.AssignedTo == userId);
+
+    public Task<int> CountByTenantAsync(Guid tenantId) =>
+        _context.Tickets.CountAsync(t => t.TenantId == tenantId);
+
+    public async Task<PagedResult<Ticket>> GetFilteredAsync(TicketFilter filter)
+    {
+        var query = _context.Tickets.Where(t => t.TenantId == filter.TenantId);
+
+        if (filter.Status is not null)
+            query = query.Where(t => t.Status == filter.Status);
+
+        if (filter.Priority is not null)
+            query = query.Where(t => t.Sla.Priority == filter.Priority);
+
+        if (filter.CategoryId is not null)
+            query = query.Where(t => t.CategoryId == filter.CategoryId);
+
+        if (filter.AssignedTo is not null)
+            query = query.Where(t => t.AssignedTo == filter.AssignedTo);
+
+        if (filter.CreatedBy is not null)
+            query = query.Where(t => t.CreatedBy == filter.CreatedBy);
+
+        if (filter.UnassignedOnly == true)
+            query = query.Where(t => t.AssignedTo == null);
+
+        if (!string.IsNullOrWhiteSpace(filter.SearchKeyword))
+        {
+            var keyword = filter.SearchKeyword.Trim();
+            query = query.Where(t =>
+                t.Title.Contains(keyword) ||
+                (t.Description != null && t.Description.Contains(keyword)));
+        }
+
+        query = filter.SortBy switch
+        {
+            "Title" => filter.SortDescending ? query.OrderByDescending(t => t.Title) : query.OrderBy(t => t.Title),
+            "Status" => filter.SortDescending ? query.OrderByDescending(t => t.Status) : query.OrderBy(t => t.Status),
+            "UpdatedAt" => filter.SortDescending ? query.OrderByDescending(t => t.UpdatedAt) : query.OrderBy(t => t.UpdatedAt),
+            _ => filter.SortDescending ? query.OrderByDescending(t => t.CreatedAt) : query.OrderBy(t => t.CreatedAt)
+        };
+
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip((filter.Page - 1) * filter.PageSize)
+            .Take(filter.PageSize)
+            .ToListAsync();
+
+        return new PagedResult<Ticket>
+        {
+            Items = items,
+            TotalCount = total,
+            Page = filter.Page,
+            PageSize 
+
+= filter.PageSize
+        };
+    }
+
+    public async Task AddAsync(Ticket ticket)
+    {
+        await _context.Tickets.AddAsync(ticket);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(Ticket ticket)
+    {
+        _context.Tickets.Update(ticket);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var ticket = await GetByIdAsync(id);
+        if (ticket is not null)
+        {
+            _context.Tickets.Remove(ticket);
+            await _context.SaveChangesAsync();
+        }
+    }
+}
+
+===== TenantDesk.Application/Services/Ticketservice.cs =====
+using AutoMapper;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Ticket;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class TicketService(
+    ITicketRepository _ticketRepository,
+    ICategoryRepository _categoryRepository,
+    ISlaRepository _slaRepository,
+    ICurrentTenantService _currentTenantService,
+    ICurrentUserService _currentUserService,
+    INotificationDispatcher _notificationDispatcher,
+    IMapper _mapper)
+{
+    public async Task<TicketResponseDto> CreateAsync(CreateTicketDto dto)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var userId = _currentUserService.GetUserId();
+
+        var category = await _categoryRepository.GetByIdAsync(dto.CategoryId)
+            ?? throw new KeyNotFoundException($"Category with ID '{dto.CategoryId}' not found.");
+
+        if (category.TenantId != tenantId)
+            throw new UnauthorizedAccessException("You cannot use a category from another tenant.");
+
+        var sla = await _slaRepository.GetByIdAsync(dto.SlaId)
+            ?? throw new KeyNotFoundException($"SLA with ID '{dto.SlaId}' not found.");
+
+        if (sla.TenantId != tenantId)
+            throw new UnauthorizedAccessException("You cannot use an SLA from another tenant.");
+
+        var ticket = new Ticket(tenantId, dto.CategoryId, dto.SlaId, userId, dto.Title, dto.Description);
+
+        await _ticketRepository.AddAsync(ticket);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> GetByIdAsync(Guid id)
+    {
+        var ticket = await GetOwnedTicketAsync(id);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<PagedResult<TicketResponseDto>> GetFilteredAsync(TicketFilter filter)
+    {
+        filter.TenantId = _currentTenantService.GetTenantId();
+
+        // Customers only ever see their own tickets, regardless of what they pass in the query.
+        if (_currentUserService.GetUserRole() == UserRole.Customer)
+            filter.CreatedBy = _currentUserService.GetUserId();
+
+        var result = await _ticketRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<TicketResponseDto>
+        {
+            Items = result.Items.Select(t => _mapper.Map<TicketResponseDto>(t)).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<TicketResponseDto> UpdateDetailsAsync(Guid id, UpdateTicketDto dto)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.UpdateDetails(dto.Title, dto.Description);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' was updated.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> ChangeStatusAsync(Guid id, TicketStatus newStatus)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.ChangeStatus(newStatus);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' status changed to {newStatus}.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> AssignAsync(Guid id, Guid assigneeUserId)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.AssignTo(assigneeUserId);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            assigneeUserId, NotificationType.TicketAssigned, $"You have been assigned ticket '{ticket.Title}'.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> CloseAsync(Guid id)
+    {
+        // Agent/Admin can close any ticket assigned to them; a Customer can only close their own.
+        var ticket = await GetOwnedTicketAsync(id);
+
+        ticket.Close();
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' was closed.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    private async Task<Ticket> GetOwnedTicketAsync(Guid id, bool agentOrAdminOnly = false)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Ticket with ID '{id}' not found.");
+
+        if (ticket.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access tickets from another tenant.");
+
+        var role = _currentUserService.GetUserRole();
+        var userId = _currentUserService.GetUserId();
+
+        if (role == UserRole.Customer)
+        {
+            if (ticket.CreatedBy != userId)
+                throw new UnauthorizedAccessException("You cannot access a ticket you did not create.");
+
+            if (agentOrAdminOnly)
+                throw new UnauthorizedAccessException("Only an agent or admin can perform this action.");
+        }
+        else if (role == UserRole.Agent && agentOrAdminOnly)
+        {
+            // Agent can only modify tickets assigned to them; Admin is exempt from this check entirely.
+            if (ticket.AssignedTo != userId)
+                throw new UnauthorizedAccessException("You can only modify tickets assigned to you.");
+        }
+
+        return ticket;
+    }
+}
+
+===== TenantDesk.Domain/Entities/Attachment.cs =====
+using System;
+
+namespace TenantDesk.Domain.Entities
+{
+    public class Attachment
+    {
+        public Guid AttachmentId { get; private set; }
+        public Guid TenantId { get; private set; }
+        public Guid TicketId { get; private set; }
+        public Guid? CommentId { get; private set; }
+        public Guid UploadedBy { get; private set; }
+        public string StoragePath { get; private set; }
+        public string FileName { get; private set; }
+        public long FileSize { get; private set; }
+        public DateTime CreatedAt { get; private set; }
+
+        // For EF Core
+        private Attachment() { }
+
+        public Attachment(Guid tenantId, Guid ticketId, Guid? commentId, Guid uploadedBy,
+                           string storagePath, string fileName, long fileSize)
+        {
+            if (string.IsNullOrWhiteSpace(storagePath))
+                throw new ArgumentException("Storage path is required.", nameof(storagePath));
+
+            if (string.IsNullOrWhiteSpace(fileName))
+                throw new ArgumentException("File name is required.", nameof(fileName));
+
+            if (fileSize <= 0)
+                throw new ArgumentException("File size must be greater than 0.", nameof(fileSize));
+
+            AttachmentId = Guid.NewGuid();
+            TenantId = tenantId;
+            TicketId = ticketId;
+            CommentId = commentId;
+            UploadedBy = uploadedBy;
+            StoragePath = storagePath;
+            FileName = fileName;
+            FileSize = fileSize;
+            CreatedAt = DateTime.UtcNow;
+        }
+    }
+}
+
+===== TenantDesk.Infrastructure/Configuration/AttachmentConfiguration.cs =====
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Infrastructure.Configurations;
+
+public class AttachmentConfiguration : IEntityTypeConfiguration<Attachment>
+{
+    public void Configure(EntityTypeBuilder<Attachment> builder)
+    {
+        builder.ToTable("Attachments");
+
+        builder.HasKey(a => a.AttachmentId);
+
+        builder.Property(a => a.StoragePath)
+            .IsRequired()
+            .HasMaxLength(500);
+
+        builder.Property(a => a.FileName)
+            .IsRequired()
+            .HasMaxLength(255);
+
+        builder.Property(a => a.FileSize)
+            .IsRequired();
+
+        builder.Property(a => a.CreatedAt)
+            .IsRequired();
+
+        builder.HasOne<Tenant>()
+            .WithMany()
+            .HasForeignKey(a => a.TenantId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Ticket>()
+            .WithMany()
+            .HasForeignKey(a => a.TicketId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Comment>()
+            .WithMany()
+            .HasForeignKey(a => a.CommentId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(a => a.UploadedBy)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasIndex(a => a.TenantId);
+
+        builder.HasIndex(a => a.TicketId);
+
+        builder.HasIndex(a => a.CommentId);
+
+        builder.HasIndex(a => a.UploadedBy);
+    }
+}
+
+===== TenantDesk.Application/Interfaces/Persistence/IAttachementRepository.cs =====
+
+using System.Net.Mail;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Attachment;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+
+public interface IAttachementRepository{
+    
+    public Task<Attachment> GetIdByAsync(Guid id);
+    public Task<long> GetTotalSizeByTenantAsync(Guid tenantId);
+    public Task<long> GetTotalSizeByTicketAsync(Guid ticketId);
+    public Task AddAsync(Attachment attachment);
+    public Task DeleteAsync();
+    public Task ExistsAsync();
+    Task<PagedResult<Attachment>> GetFilteredAsync(AttachmentFilter filter);
+}
+
+===== TenantDesk.Application/Interfaces/Persistence/Filters/AttachmentFilter.cs =====
+using TenantDesk.Application.Common;
+
+namespace TenantDesk.Application.Interfaces.Persistence.Filters;
+
+public class AttachmentFilter : PagedFilter
+{
+    public Guid? TicketId { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid? CommentId { get; set; }
+    public Guid? UploadedBy { get; set; }
+}
+
+===== TenantDesk.Application/Dto/Attachment/CreateAttachmentDto.cs =====
+namespace TenantDesk.Application.Dto.Attachment;
+
+// Used with: POST /api/tickets/{ticketId}/attachments
+// TicketId comes from the route; UploadedBy comes from the authenticated user's context.
+public record CreateAttachmentDto(
+    Guid? CommentId,
+    string StoragePath,
+    string FileName,
+    long FileSize
+);
+
+
+===== TenantDesk.Application/Dto/Attachment/AttachmentResponseDto.cs =====
+namespace TenantDesk.Application.Dto.Attachment;
+
+// Returned from: GET/POST /api/tickets/{ticketId}/attachments
+public record AttachmentResponseDto(
+    Guid AttachmentId,
+    Guid TicketId,
+    Guid? CommentId,
+    Guid UploadedBy,
+    string FileName,
+    long FileSize,
+    DateTime CreatedAt
+);
+
+
+===== TenantDesk.Application/Interfaces/Services/IFileStorageService.cs =====
+using System.ComponentModel.DataAnnotations;
+
+public interface IFileStorageService
+{
+    public Task UploadAsync (Stream file, string fileName);
+    public Task <Stream> DownloadAsync(string storagePath);
+    public Task DeleteAsync(string storagePath);
+    public Task <String>GetPublicUrlAsync(string storagePath);
+    public Task<bool>ExistsAsync(string storagePath);
+
+
+}
+
+===== TenantDesk.Infrastructure/Repositories/CommentRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class CommentRepository(AppDbContext _context) : ICommentRepository
+{
+    public Task<Comment?> GetByIdAsync(Guid id) =>
+        _context.Comments.FirstOrDefaultAsync(c => c.CommentId == id);
+
+    public Task<int> CountByTicketAsync(Guid ticketId) =>
+        _context.Comments.CountAsync(c => c.TicketId == ticketId);
+
+    public async Task<PagedResult<Comment>> GetFilteredAsync(CommentFilter filter)
+    {
+        var query = _context.Comments.Where(c => c.TenantId == filter.TenantId);
+
+        if (filter.TicketId is not null)
+            query = query.Where(c => c.TicketId == filter.TicketId);
+
+        if (filter.UserId is not null)
+            query = query.Where(c => c.UserId == filter.UserId);
+
+        query = query.OrderByDescending(c => c.CreatedAt);
+
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip((filter.Page - 1) * filter.PageSize)
+            .Take(filter.PageSize)
+            .ToListAsync();
+
+        return new PagedResult<Comment>
+        {
+            Items = items,
+            TotalCount = total,
+            Page = filter.Page,
+            PageSize = filter.PageSize
+        };
+    }
+
+    public async Task AddAsync(Comment comment)
+    {
+        await _context.Comments.AddAsync(comment);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(Comment comment)
+    {
+        _context.Comments.Update(comment);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var comment = await GetByIdAsync(id);
+        if (comment is not null)
+        {
+            _context.Comments.Remove(comment);
+            await _context.SaveChangesAsync();
+        }
+    }
+}
+
+===== TenantDesk.Application/Services/CommentService.cs =====
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Mapping;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class CommentService(
+    ICommentRepository _commentRepository,
+    ITicketRepository _ticketRepository,
+    ICurrentTenantService _currentTenantService,
+    ICurrentUserService _currentUserService)
+{
+    public async Task<CommentResponseDto> CreateAsync(Guid ticketId, CreateCommentDto dto)
+    {
+        await EnsureCanAccessTicketAsync(ticketId);
+
+        var tenantId = _currentTenantService.GetTenantId();
+        var userId = _currentUserService.GetUserId();
+
+        var comment = new Comment(tenantId, ticketId, userId, dto.Content);
+
+        await _commentRepository.AddAsync(comment);
+
+        return comment.ToDto();
+    }
+
+    public async Task<PagedResult<CommentResponseDto>> GetByTicketAsync(Guid ticketId, CommentFilter filter)
+    {
+        await EnsureCanAccessTicketAsync(ticketId);
+
+        filter.TenantId = _currentTenantService.GetTenantId();
+        filter.TicketId = ticketId;
+
+        var result = await _commentRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<CommentResponseDto>
+        {
+            Items = result.Items.Select(c => c.ToDto()).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<CommentResponseDto> UpdateAsync(Guid id, UpdateCommentDto dto)
+    {
+        var comment = await GetOwnedCommentAsync(id);
+
+        var userId = _currentUserService.GetUserId();
+        if (comment.UserId != userId)
+            throw new UnauthorizedAccessException("You can only edit your own comments.");
+
+        comment.UpdateContent(dto.Content);
+
+        await _commentRepository.UpdateAsync(comment);
+
+        return comment.ToDto();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var comment = await GetOwnedCommentAsync(id);
+
+        var userId = _currentUserService.GetUserId();
+        var role = _currentUserService.GetUserRole();
+
+        if (comment.UserId != userId && role != UserRole.Admin)
+            throw new UnauthorizedAccessException("You can only delete your own comments.");
+
+        await _commentRepository.DeleteAsync(id);
+    }
+
+    
+    private async Task<Comment> GetOwnedCommentAsync(Guid id)
+    {
+        var comment = await _commentRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Comment with ID '{id}' not found.");
+
+        if (comment.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access comments from another tenant.");
+
+        return comment;
+    }
+
+
+    private async Task EnsureCanAccessTicketAsync(Guid ticketId)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(ticketId)
+            ?? throw new KeyNotFoundException($"Ticket with ID '{ticketId}' not found.");
+
+        if (ticket.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access tickets from another tenant.");
+
+        var role = _currentUserService.GetUserRole();
+        var userId = _currentUserService.GetUserId();
+
+        if (role == UserRole.Customer && ticket.CreatedBy != userId)
+            throw new UnauthorizedAccessException("You cannot access a ticket you did not create.");
+
+        if (role == UserRole.Agent && ticket.AssignedTo != userId)
+            throw new UnauthorizedAccessException("You can only access tickets assigned to you.");
+
+        // Admin: no additional restriction.
+    }
+}
+
+===== TenantDesk.Api/Controllers/CommentsController.cs =====
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+public class CommentsController(CommentService _commentService) : ControllerBase
+{
+    // POST: api/tickets/{ticketId}/comments
+    [HttpPost("api/tickets/{ticketId:guid}/comments")]
+    public async Task<ActionResult<CommentResponseDto>> Create(Guid ticketId, CreateCommentDto dto)
+    {
+        var comment = await _commentService.CreateAsync(ticketId, dto);
+
+        return Ok(comment);
+    }
+
+    // GET: api/tickets/{ticketId}/comments?page=1&pageSize=20
+    [HttpGet("api/tickets/{ticketId:guid}/comments")]
+    public async Task<ActionResult<PagedResult<CommentResponseDto>>> GetByTicket(
+        Guid ticketId,
+        [FromQuery] CommentFilter filter)
+    {
+        var result = await _commentService.GetByTicketAsync(ticketId, filter);
+
+        return Ok(result);
+    }
+
+    // PUT: api/comments/{id}
+    [HttpPut("api/comments/{id:guid}")]
+    public async Task<ActionResult<CommentResponseDto>> Update(Guid id, UpdateCommentDto dto)
+    {
+        var comment = await _commentService.UpdateAsync(id, dto);
+
+        return Ok(comment);
+    }
+
+    // DELETE: api/comments/{id}
+    [HttpDelete("api/comments/{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _commentService.DeleteAsync(id);
+
+        return NoContent();
+    }
+}
+
+===== TenantDesk.Application/Mapping/CommentMapperExtensions.cs =====
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Mapping;
+
+public static class CommentMapperExtensions
+{
+    public static CommentResponseDto ToDto(this Comment comment)
+    {
+        return new CommentResponseDto(
+            comment.CommentId,
+            comment.TicketId,
+            comment.UserId,
+            comment.Content,
+            comment.CreatedAt
+        );
+    }
+}
+
+===== TenantDesk.Infrastructure/Repositories/TicketRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+using TenantDesk.Infrastructure.Data;
+
+namespace TenantDesk.Infrastructure.Repositories;
+
+public class TicketRepository(AppDbContext _context) : ITicketRepository
+{
+    public Task<Ticket?> GetByIdAsync(Guid id) =>
+        _context.Tickets.FirstOrDefaultAsync(t => t.TicketId == id);
+
+    public Task<bool> ExistsAsync(Guid id) =>
+        _context.Tickets.AnyAsync(t => t.TicketId == id);
+
+    public Task<int> CountByStatusAsync(Guid tenantId, TicketStatus status) =>
+        _context.Tickets.CountAsync(t => t.TenantId == tenantId && t.Status == status);
+
+    public Task<int> CountAssignedToUserAsync(Guid userId) =>
+        _context.Tickets.CountAsync(t => t.AssignedTo == userId);
+
+    public Task<int> CountByTenantAsync(Guid tenantId) =>
+        _context.Tickets.CountAsync(t => t.TenantId == tenantId);
+
+    public async Task<PagedResult<Ticket>> GetFilteredAsync(TicketFilter filter)
+    {
+        var query = _context.Tickets.Where(t => t.TenantId == filter.TenantId);
+
+        if (filter.Status is not null)
+            query = query.Where(t => t.Status == filter.Status);
+
+        if (filter.Priority is not null)
+            query = query.Where(t => t.Sla.Priority == filter.Priority);
+
+        if (filter.CategoryId is not null)
+            query = query.Where(t => t.CategoryId == filter.CategoryId);
+
+        if (filter.AssignedTo is not null)
+            query = query.Where(t => t.AssignedTo == filter.AssignedTo);
+
+        if (filter.CreatedBy is not null)
+            query = query.Where(t => t.CreatedBy == filter.CreatedBy);
+
+        if (filter.UnassignedOnly == true)
+            query = query.Where(t => t.AssignedTo == null);
+
+        if (!string.IsNullOrWhiteSpace(filter.SearchKeyword))
+        {
+            var keyword = filter.SearchKeyword.Trim();
+            query = query.Where(t =>
+                t.Title.Contains(keyword) ||
+                (t.Description != null && t.Description.Contains(keyword)));
+        }
+
+        query = filter.SortBy switch
+        {
+            "Title" => filter.SortDescending ? query.OrderByDescending(t => t.Title) : query.OrderBy(t => t.Title),
+            "Status" => filter.SortDescending ? query.OrderByDescending(t => t.Status) : query.OrderBy(t => t.Status),
+            "UpdatedAt" => filter.SortDescending ? query.OrderByDescending(t => t.UpdatedAt) : query.OrderBy(t => t.UpdatedAt),
+            _ => filter.SortDescending ? query.OrderByDescending(t => t.CreatedAt) : query.OrderBy(t => t.CreatedAt)
+        };
+
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip((filter.Page - 1) * filter.PageSize)
+            .Take(filter.PageSize)
+            .ToListAsync();
+
+        return new PagedResult<Ticket>
+        {
+            Items = items,
+            TotalCount = total,
+            Page = filter.Page,
+            PageSize 
+
+= filter.PageSize
+        };
+    }
+
+    public async Task AddAsync(Ticket ticket)
+    {
+        await _context.Tickets.AddAsync(ticket);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(Ticket ticket)
+    {
+        _context.Tickets.Update(ticket);
+        await _context.SaveChangesAsync();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var ticket = await GetByIdAsync(id);
+        if (ticket is not null)
+        {
+            _context.Tickets.Remove(ticket);
+            await _context.SaveChangesAsync();
+        }
+    }
+}
+
+===== TenantDesk.Application/Services/Ticketservice.cs =====
+using AutoMapper;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Ticket;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class TicketService(
+    ITicketRepository _ticketRepository,
+    ICategoryRepository _categoryRepository,
+    ISlaRepository _slaRepository,
+    ICurrentTenantService _currentTenantService,
+    ICurrentUserService _currentUserService,
+    INotificationDispatcher _notificationDispatcher,
+    IMapper _mapper)
+{
+    public async Task<TicketResponseDto> CreateAsync(CreateTicketDto dto)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var userId = _currentUserService.GetUserId();
+
+        var category = await _categoryRepository.GetByIdAsync(dto.CategoryId)
+            ?? throw new KeyNotFoundException($"Category with ID '{dto.CategoryId}' not found.");
+
+        if (category.TenantId != tenantId)
+            throw new UnauthorizedAccessException("You cannot use a category from another tenant.");
+
+        var sla = await _slaRepository.GetByIdAsync(dto.SlaId)
+            ?? throw new KeyNotFoundException($"SLA with ID '{dto.SlaId}' not found.");
+
+        if (sla.TenantId != tenantId)
+            throw new UnauthorizedAccessException("You cannot use an SLA from another tenant.");
+
+        var ticket = new Ticket(tenantId, dto.CategoryId, dto.SlaId, userId, dto.Title, dto.Description);
+
+        await _ticketRepository.AddAsync(ticket);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> GetByIdAsync(Guid id)
+    {
+        var ticket = await GetOwnedTicketAsync(id);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<PagedResult<TicketResponseDto>> GetFilteredAsync(TicketFilter filter)
+    {
+        filter.TenantId = _currentTenantService.GetTenantId();
+
+        // Customers only ever see their own tickets, regardless of what they pass in the query.
+        if (_currentUserService.GetUserRole() == UserRole.Customer)
+            filter.CreatedBy = _currentUserService.GetUserId();
+
+        var result = await _ticketRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<TicketResponseDto>
+        {
+            Items = result.Items.Select(t => _mapper.Map<TicketResponseDto>(t)).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<TicketResponseDto> UpdateDetailsAsync(Guid id, UpdateTicketDto dto)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.UpdateDetails(dto.Title, dto.Description);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' was updated.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> ChangeStatusAsync(Guid id, TicketStatus newStatus)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.ChangeStatus(newStatus);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' status changed to {newStatus}.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> AssignAsync(Guid id, Guid assigneeUserId)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.AssignTo(assigneeUserId);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            assigneeUserId, NotificationType.TicketAssigned, $"You have been assigned ticket '{ticket.Title}'.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> CloseAsync(Guid id)
+    {
+        // Agent/Admin can close any ticket assigned to them; a Customer can only close their own.
+        var ticket = await GetOwnedTicketAsync(id);
+
+        ticket.Close();
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' was closed.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    private async Task<Ticket> GetOwnedTicketAsync(Guid id, bool agentOrAdminOnly = false)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Ticket with ID '{id}' not found.");
+
+        if (ticket.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access tickets from another tenant.");
+
+        var role = _currentUserService.GetUserRole();
+        var userId = _currentUserService.GetUserId();
+
+        if (role == UserRole.Customer)
+        {
+            if (ticket.CreatedBy != userId)
+                throw new UnauthorizedAccessException("You cannot access a ticket you did not create.");
+
+            if (agentOrAdminOnly)
+                throw new UnauthorizedAccessException("Only an agent or admin can perform this action.");
+        }
+        else if (role == UserRole.Agent && agentOrAdminOnly)
+        {
+            // Agent can only modify tickets assigned to them; Admin is exempt from this check entirely.
+            if (ticket.AssignedTo != userId)
+                throw new UnauthorizedAccessException("You can only modify tickets assigned to you.");
+        }
+
+        return ticket;
+    }
+}
+
