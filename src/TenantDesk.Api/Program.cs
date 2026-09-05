@@ -59,7 +59,8 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 );
 builder.Services.AddAutoMapper(typeof(UserMappingProfile).Assembly);
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
-
+builder.Services.AddScoped<ICommentRepository, CommentRepository>();
+builder.Services.AddScoped<CommentService>();
 // --- from development: Plan + Tenant (Phase 2) ---
 builder.Services.AddScoped<IPlanRepository, PlanRepository>();
 builder.Services.AddScoped<PlanService>();

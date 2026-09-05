@@ -6,7 +6,7 @@ using TenantDesk.Domain.Entities;
 public interface ICommentRepository
 {
     
-    public Task<Comment> GetByIdAsync(Guid id);
+    public Task<Comment?> GetByIdAsync(Guid id);
     public Task<int> CountByTicketAsync(Guid ticketId);
     public Task AddAsync(Comment comment);
     public Task UpdateAsync(Comment commnet);
