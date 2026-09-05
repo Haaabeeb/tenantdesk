@@ -28,7 +28,7 @@ public class EmailService : IEmailService
         var fromName = smtpConfig["FromName"] ?? "TenantDesk Support";
         var enableSsl = bool.TryParse(smtpConfig["EnableSsl"], out var ssl) && ssl;
 
-        // Fallback to logging if SMTP is not configured in development
+        
         if (string.IsNullOrWhiteSpace(host))
         {
             _logger.LogWarning("[SMTP Unconfigured] Email to {To} with Subject '{Subject}': {Body}", to, subject, body);
@@ -60,7 +60,7 @@ public class EmailService : IEmailService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to send email to {To}", to);
-            // Do not rethrow to prevent breaking the primary user workflow (e.g., ticket assignment)
+            
         }
     }
 
