@@ -1,0 +1,105 @@
+@baseUrl = http://localhost:5052
+@jwt =eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJsb2NhbF91c2VyX2lkIjoiMDhkZjBiZjEtZDAxMS00NDQwLThhNjQtNmUxNzE3ZmViN2E2IiwidGVuYW50X2lkIjoiMDhkZjBhNDEtZDFkYy00MTY3LThmY2MtOWNkNTNkYTdjZDY0IiwiaHR0cDovL3NjaGVtYXMueG1sc29hcC5vcmcvd3MvMjAwNS8wNS9pZGVudGl0eS9jbGFpbXMvZW1haWxhZGRyZXNzIjoicmVkaXNhZG1pbkB0ZXN0LmNvbSIsImh0dHA6Ly9zY2hlbWFzLm1pY3Jvc29mdC5jb20vd3MvMjAwOC8wNi9pZGVudGl0eS9jbGFpbXMvcm9sZSI6IkFkbWluIiwiZXhwIjoxNzg4NzI3OTM4LCJpc3MiOiJUZW5hbnREZXNrIiwiYXVkIjoiVGVuYW50RGVza0FwaSJ9.Lvn9jUiNmdseRBIxe68lZw-UO_u1zHgP9wWyByWccHk
+### ========================================
+### 1) LOGIN AS ADMIN
+### ========================================
+
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "redisadmin@test.com",
+  "password": "Test123!",
+  "tenantSubdomain": "acme"
+}
+
+
+
+### ========================================
+### 2) PHASE 1 — IMemoryCache
+### GET Plans — First Request
+### ========================================
+
+GET {{baseUrl}}/api/plans
+Accept: application/json
+
+
+### ========================================
+### 3) PHASE 1 — IMemoryCache
+### GET Plans — Second Request
+### ========================================
+
+GET {{baseUrl}}/api/plans
+Accept: application/json
+
+
+### ========================================
+### 4) PHASE 2 PART 2 — REDIS
+### Dashboard — First Request
+### Expected: MISS
+### ========================================
+
+GET {{baseUrl}}/api/dashboard
+Authorization: Bearer {{jwt}}
+Accept: application/json
+
+
+### ========================================
+### 5) PHASE 2 PART 2 — REDIS
+### Dashboard — Second Request
+### Expected: HIT
+### ========================================
+
+GET {{baseUrl}}/api/dashboard
+Authorization: Bearer {{jwt}}
+Accept: application/json
+
+
+
+
+### ========================================
+### PHASE 1 — IMemoryCache Invalidation Test
+###
+### الفكرة:
+### GET -> HIT
+### CREATE -> cache INVALIDATED
+### GET -> MISS
+### GET -> HIT
+### ========================================
+
+
+### ========================================
+### 1) CREATE NEW PLAN
+### Expected:
+### Plans cache INVALIDATED after creating plan ...
+### ========================================
+
+POST {{baseUrl}}/api/plans
+Content-Type: application/json
+
+{
+  "name": "CacheTestffffPlanي",
+  "rateLimitPerMinute": 150
+}
+
+
+### ========================================
+### 2) GET PLANS AFTER CREATE
+### Expected:
+### Plans cache MISS
+### + SELECT from Database
+### ========================================
+
+GET {{baseUrl}}/api/plans
+Accept: application/json
+
+
+### ========================================
+### 3) GET PLANS AGAIN
+### Expected:
+### Plans cache HIT
+### No SELECT Plans query
+### ========================================
+  
+GET {{baseUrl}}/api/plans
+Accept: application/json

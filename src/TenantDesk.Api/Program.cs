@@ -61,6 +61,14 @@ builder.Services.AddAutoMapper(typeof(UserMappingProfile).Assembly);
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<ICommentRepository, CommentRepository>();
 builder.Services.AddScoped<CommentService>();
+builder.Services.AddMemoryCache();
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration =
+        builder.Configuration["Redis:ConnectionString"];
+
+    options.InstanceName = "TenantDesk:";
+});
 // --- from development: Plan + Tenant (Phase 2) ---
 builder.Services.AddScoped<IPlanRepository, PlanRepository>();
 builder.Services.AddScoped<PlanService>();
@@ -73,6 +81,7 @@ builder.Services.AddScoped<CommentService>();
 builder.Services.AddScoped<ISlaRepository, SlaRepository>();
 builder.Services.AddScoped<SlaService>();
 builder.Services.AddScoped<TicketService>();
+builder.Services.AddScoped<DashboardService>();
 builder.Services.AddScoped<IBusinessHourRepository, BusinessHourRepository>();
 builder.Services.AddScoped<BusinessHourService>();
 builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
