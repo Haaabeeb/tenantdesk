@@ -5,4 +5,7 @@
     <Project Path="src/TenantDesk.Domain/TenantDesk.Domain.csproj" />
     <Project Path="src/TenantDesk.Infrastructure/TenantDesk.Infrastructure.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TenantDesk.UnitTests/TenantDesk.UnitTests.csproj" />
+  </Folder>
 </Solution>
