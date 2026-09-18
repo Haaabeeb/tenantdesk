@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using AutoMapper;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 using Moq;
 using TenantDesk.Application.Dto.BusinessHour;
 using TenantDesk.Application.Interfaces;
@@ -19,6 +21,8 @@ public class BusinessHourServiceTests
     private readonly Mock<IBusinessHourRepository> _businessHourRepoMock;
     private readonly Mock<ICurrentTenantService> _currentTenantServiceMock;
     private readonly Mock<IMapper> _mapperMock;
+    private readonly IMemoryCache _memoryCache;
+    private readonly Mock<ILogger<BusinessHourService>> _loggerMock;
     private readonly BusinessHourService _sut;
     private readonly Guid _currentTenantId;
 
@@ -27,6 +31,8 @@ public class BusinessHourServiceTests
         _businessHourRepoMock = new Mock<IBusinessHourRepository>();
         _currentTenantServiceMock = new Mock<ICurrentTenantService>();
         _mapperMock = new Mock<IMapper>();
+        _memoryCache = new MemoryCache(new MemoryCacheOptions());
+        _loggerMock = new Mock<ILogger<BusinessHourService>>();
 
         _currentTenantId = Guid.NewGuid();
         _currentTenantServiceMock.Setup(c => c.GetTenantId()).Returns(_currentTenantId);
@@ -34,7 +40,9 @@ public class BusinessHourServiceTests
         _sut = new BusinessHourService(
             _businessHourRepoMock.Object,
             _currentTenantServiceMock.Object,
-            _mapperMock.Object);
+            _mapperMock.Object,
+            _memoryCache,
+            _loggerMock.Object);
     }
 
     [Fact]

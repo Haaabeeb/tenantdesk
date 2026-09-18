@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using TenantDesk.Application.Common.Interfaces;
 using TenantDesk.Application.Interfaces;
 using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence;
 using TenantDesk.Application.Interfaces.Services;
 using TenantDesk.Infrastructure.Data;
 using TenantDesk.Application.Services;
@@ -30,7 +31,33 @@ builder.Services.AddControllers(options =>
     options.Filters.AddService<RequestLoggingFilter>();
 });
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+        Scheme = "Bearer",
+        BearerFormat = "JWT",
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Description = "Enter: Bearer {your JWT token}"
+    });
+
+    options.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    {
+        {
+            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            {
+                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                {
+                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
 
 var connectionString =
     builder.Configuration.GetConnectionString("DefaultConnection");
@@ -47,22 +74,32 @@ builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>("database")
 
 builder.Services.AddAutoMapper(typeof(UserMappingProfile).Assembly);
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+builder.Services.AddScoped<ICommentRepository, CommentRepository>();
+builder.Services.AddScoped<CommentService>();
+builder.Services.AddMemoryCache();
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration =
+        builder.Configuration["Redis:ConnectionString"];
 
+    options.InstanceName = "TenantDesk:";
+});
 // --- from development: Plan + Tenant (Phase 2) ---
 builder.Services.AddScoped<IPlanRepository, PlanRepository>();
 builder.Services.AddScoped<PlanService>();
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<TenantService>();
-
-
+// --- end Phase 2 ---
+builder.Services.AddScoped<ITicketRepository, TicketRepository>();
+builder.Services.AddScoped<TicketService>();
 builder.Services.AddScoped<ISlaRepository, SlaRepository>();
 builder.Services.AddScoped<SlaService>();
-
-builder.Services.AddScoped<ITicketRepository, TicketRepository>();
-
+builder.Services.AddScoped<DashboardService>();
+builder.Services.AddScoped<IAttachementRepository, AttachmentRepository>();
+builder.Services.AddScoped<AttachmentService>();
 builder.Services.AddScoped<IBusinessHourRepository, BusinessHourRepository>();
 builder.Services.AddScoped<BusinessHourService>();
-
+builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 builder.Services.AddScoped<IDateTimeProvider, DateTimeProvider>();
 builder.Services.AddSingleton<IBusinessTimeCalculator, BusinessTimeCalculator>();
 builder.Services.AddScoped<ISlaCalculatorService, SlaCalculatorService>();

@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using AutoMapper;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 using Moq;
 using TenantDesk.Application.Dto.Plan;
 using TenantDesk.Application.Interfaces;
@@ -17,16 +19,22 @@ public class PlanServiceTests
 {
     private readonly Mock<IPlanRepository> _repositoryMock;
     private readonly Mock<IMapper> _mapperMock;
+    private readonly IMemoryCache _memoryCache;
+    private readonly Mock<ILogger<PlanService>> _loggerMock;
     private readonly PlanService _sut;
 
     public PlanServiceTests()
     {
         _repositoryMock = new Mock<IPlanRepository>();
         _mapperMock = new Mock<IMapper>();
+        _memoryCache = new MemoryCache(new MemoryCacheOptions());
+        _loggerMock = new Mock<ILogger<PlanService>>();
 
         _sut = new PlanService(
             _repositoryMock.Object,
-            _mapperMock.Object);
+            _mapperMock.Object,
+            _memoryCache,
+            _loggerMock.Object);
     }
 
     [Fact]
@@ -187,7 +195,7 @@ public class PlanServiceTests
         _repositoryMock.Setup(r => r.GetByIdAsync(planId))
             .ReturnsAsync(plan);
 
-        var expectedDto = new PlanResponseDto(planId, planName, 500, plan.CreatedAt);
+        var expectedDto = new PlanResponseDto(planId, planName, 5000, plan.CreatedAt);
         _mapperMock.Setup(m => m.Map<PlanResponseDto>(plan))
             .Returns(expectedDto);
 
@@ -196,7 +204,7 @@ public class PlanServiceTests
 
         // Assert
         Assert.NotNull(result);
-        Assert.Equal(500, plan.RateLimitPerMinute);
+        Assert.Equal(5000, plan.RateLimitPerMinute);
         _repositoryMock.Verify(r => r.UpdateAsync(plan), Times.Once);
     }
 

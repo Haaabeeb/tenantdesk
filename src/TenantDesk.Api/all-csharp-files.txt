@@ -1,0 +1,864 @@
+
+============================================================
+FILE: ./Controllers/AttachmentsController.cs
+============================================================
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Attachment;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+public class AttachmentsController(AttachmentService _attachmentService) : ControllerBase
+{
+    // POST: api/tickets/{ticketId}/attachments
+    [HttpPost("api/tickets/{ticketId:guid}/attachments")]
+    public async Task<ActionResult<AttachmentResponseDto>> Create(
+        Guid ticketId,
+        [FromForm] CreateAttachmentDto dto,
+        IFormFile file)
+    {
+        await using var stream = file.OpenReadStream();
+
+        var attachment = await _attachmentService.CreateAsync(ticketId, dto, stream);
+
+        return Ok(attachment);
+    }
+
+    // GET: api/tickets/{ticketId}/attachments?page=1&pageSize=20
+    [HttpGet("api/tickets/{ticketId:guid}/attachments")]
+    public async Task<ActionResult<PagedResult<AttachmentResponseDto>>> GetByTicket(
+        Guid ticketId,
+        [FromQuery] AttachmentFilter filter)
+    {
+        var result = await _attachmentService.GetByTicketAsync(ticketId, filter);
+
+        return Ok(result);
+    }
+
+    // DELETE: api/attachments/{id}
+    [HttpDelete("api/attachments/{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _attachmentService.DeleteAsync(id);
+
+        return NoContent();
+    }
+}
+
+============================================================
+FILE: ./Controllers/AuthController.cs
+============================================================
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Dto.Auth;
+using TenantDesk.Application.Interfaces.Identity;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/auth")]
+public class AuthController(IAuthService authService) : ControllerBase
+{
+    private readonly IAuthService _authService = authService;
+
+    [HttpPost("register")]
+    public async Task<ActionResult<AuthResponseDto>> Register(RegisterDto dto)
+    {
+        
+        var result = await _authService.RegisterAsync(dto);
+        return Ok(result);
+    }
+
+    
+    [HttpPost("login")]
+    public async Task<ActionResult<AuthResponseDto>> Login(LoginDto dto)
+    {
+        var result = await _authService.LoginAsync(dto);
+        return Ok(result);
+    }
+}
+
+============================================================
+FILE: ./Controllers/BusinessHoursController.cs
+============================================================
+
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Dto.BusinessHour;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/business-hours")]
+public class BusinessHoursController : ControllerBase
+{
+    private readonly BusinessHourService _businessHourService;
+
+    public BusinessHoursController(BusinessHourService businessHourService)
+    {
+        _businessHourService = businessHourService;
+    }
+
+    // POST: api/business-hours
+    [HttpPost]
+    public async Task<ActionResult<BusinessHourResponseDto>> Create([FromBody] CreateBusinessHourDto dto)
+    {
+        var result = await _businessHourService.CreateAsync(dto);
+        return CreatedAtAction(nameof(GetById), new { id = result.BusinessHourId }, result);
+    }
+
+    // GET: api/business-hours/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<BusinessHourResponseDto>> GetById(Guid id)
+    {
+        var result = await _businessHourService.GetByIdAsync(id);
+        return Ok(result);
+    }
+
+    // GET: api/business-hours
+    [HttpGet]
+    public async Task<ActionResult<IEnumerable<BusinessHourResponseDto>>> GetAll()
+    {
+        var result = await _businessHourService.GetAllAsync();
+        return Ok(result);
+    }
+
+    // GET: api/business-hours/day/{day}
+    [HttpGet("day/{day}")]
+    public async Task<ActionResult<BusinessHourResponseDto>> GetByDay(DayOfWeek day)
+    {
+        var result = await _businessHourService.GetByDayAsync(day);
+        return Ok(result);
+    }
+
+    // PUT: api/business-hours/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<BusinessHourResponseDto>> Update(Guid id, [FromBody] UpdateBusinessHourDto dto)
+    {
+        var result = await _businessHourService.UpdateAsync(id, dto);
+        return Ok(result);
+    }
+
+    // DELETE: api/business-hours/{id}
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _businessHourService.DeleteAsync(id);
+        return NoContent();
+    }
+}
+
+============================================================
+FILE: ./Controllers/CategoryController.cs
+============================================================
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Category;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class CategoriesController(CategoryService _categoryService) : ControllerBase
+{
+    // POST: api/categories
+    [HttpPost]
+    public async Task<ActionResult<CategoryResponseDto>> Create(CreateCategoryDto dto)
+    {
+        var category = await _categoryService.CreateAsync(dto);
+
+        return CreatedAtAction(
+            nameof(GetById),
+            new { id = category.CategoryId },
+            category);
+    }
+
+    // GET: api/categories/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<CategoryResponseDto>> GetById(Guid id)
+    {
+        var category = await _categoryService.GetByIdAsync(id);
+
+        return Ok(category);
+    }
+
+    // GET: api/categories?isActive=true&page=1&pageSize=20
+    [HttpGet]
+    public async Task<ActionResult<PagedResult<CategoryResponseDto>>> GetFiltered([FromQuery] CategoryFilter filter)
+    {
+        var result = await _categoryService.GetFilteredAsync(filter);
+
+        return Ok(result);
+    }
+
+    // PUT: api/categories/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<CategoryResponseDto>> Update(Guid id, UpdateCategoryDto dto)
+    {
+        var category = await _categoryService.UpdateAsync(id, dto);
+
+        return Ok(category);
+    }
+
+    // DELETE: api/categories/{id}
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _categoryService.DeleteAsync(id);
+
+        return NoContent();
+    }
+}
+
+============================================================
+FILE: ./Controllers/CommentsController.cs
+============================================================
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+public class CommentsController(CommentService _commentService) : ControllerBase
+{
+    // POST: api/tickets/{ticketId}/comments
+    [HttpPost("api/tickets/{ticketId:guid}/comments")]
+    public async Task<ActionResult<CommentResponseDto>> Create(Guid ticketId, CreateCommentDto dto)
+    {
+        var comment = await _commentService.CreateAsync(ticketId, dto);
+
+        return Ok(comment);
+    }
+
+    // GET: api/tickets/{ticketId}/comments?page=1&pageSize=20
+    [HttpGet("api/tickets/{ticketId:guid}/comments")]
+    public async Task<ActionResult<PagedResult<CommentResponseDto>>> GetByTicket(
+        Guid ticketId,
+        [FromQuery] CommentFilter filter)
+    {
+        var result = await _commentService.GetByTicketAsync(ticketId, filter);
+
+        return Ok(result);
+    }
+
+    // PUT: api/comments/{id}
+    [HttpPut("api/comments/{id:guid}")]
+    public async Task<ActionResult<CommentResponseDto>> Update(Guid id, UpdateCommentDto dto)
+    {
+        var comment = await _commentService.UpdateAsync(id, dto);
+
+        return Ok(comment);
+    }
+
+    // DELETE: api/comments/{id}
+    [HttpDelete("api/comments/{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _commentService.DeleteAsync(id);
+
+        return NoContent();
+    }
+}
+
+============================================================
+FILE: ./Controllers/DashboardController.cs
+============================================================
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Dto.Dashboard;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/dashboard")]
+[Authorize(Roles = "Admin")]
+public class DashboardController(
+    DashboardService _dashboardService) : ControllerBase
+{
+    [HttpGet]
+    public async Task<ActionResult<DashboardResponseDto>> Get()
+    {
+        var dashboard = await _dashboardService.GetAsync();
+
+        return Ok(dashboard);
+    }
+}
+
+============================================================
+FILE: ./Controllers/PlansController.cs
+============================================================
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Services;
+using TenantDesk.Application.Dto.Plan;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/plans")]
+public class PlansController(PlanService planService) : ControllerBase
+{
+    private readonly PlanService _planService = planService;
+
+    // POST: api/plans
+    [HttpPost]
+    public async Task<IActionResult> CreatePlan(CreatePlanDto dto)
+    {
+        var plan = await _planService.CreateAsync(dto);
+
+        return CreatedAtAction(
+            nameof(GetPlanById),
+            new { planId = plan.PlanId },
+            plan);
+    }
+
+    // GET: api/plans/{planId}
+    [HttpGet("{planId}")]
+    public async Task<IActionResult> GetPlanById(Guid planId)
+    {
+        var plan = await _planService.GetByIdAsync(planId);
+
+        return Ok(plan);
+    }
+
+    // GET: api/plans
+    [HttpGet]
+    public async Task<IActionResult> GetAllPlans()
+    {
+        var plans = await _planService.GetAllAsync();
+
+        return Ok(plans);
+    }
+
+    // PUT: api/plans/{planId}/rate-limit
+    [HttpPut("{planId}/rate-limit")]
+    public async Task<IActionResult> ChangeRateLimit(
+        Guid planId,
+        ChangePlanRateLimitDto dto)
+    {
+        await _planService.ChangeRateLimitAsync(planId, dto);
+
+        return NoContent();
+    }
+
+    // DELETE: api/plans/{id}
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _planService.DeleteAsync(id);
+
+        return NoContent();
+    }
+
+
+    
+}
+
+============================================================
+FILE: ./Controllers/SlasController.cs
+============================================================
+
+
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Dto.Sla;
+using TenantDesk.Application.Services;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class SlasController : ControllerBase
+{
+    private readonly SlaService _slaService;
+
+    public SlasController(SlaService slaService)
+    {
+        _slaService = slaService;
+    }
+
+    // POST: api/slas
+    [HttpPost]
+    public async Task<ActionResult<SlaResponseDto>> Create([FromBody] CreateSlaDto dto)
+    {
+        var result = await _slaService.CreateAsync(dto);
+        return CreatedAtAction(nameof(GetById), new { id = result.SlaId }, result);
+    }
+
+    // GET: api/slas/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<SlaResponseDto>> GetById(Guid id)
+    {
+        var result = await _slaService.GetByIdAsync(id);
+        return Ok(result);
+    }
+
+    // GET: api/slas
+    [HttpGet]
+    public async Task<ActionResult<IEnumerable<SlaResponseDto>>> GetAll()
+    {
+        var result = await _slaService.GetAllAsync();
+        return Ok(result);
+    }
+
+    // GET: api/slas/priority/{priority}
+    [HttpGet("priority/{priority}")]
+    public async Task<ActionResult<SlaResponseDto>> GetByPriority(PriorityLevel priority)
+    {
+        var result = await _slaService.GetByPriorityAsync(priority);
+        return Ok(result);
+    }
+
+    // PUT: api/slas/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<SlaResponseDto>> Update(Guid id, [FromBody] UpdateSlaTimesDto dto)
+    {
+        var result = await _slaService.UpdateAsync(id, dto);
+        return Ok(result);
+    }
+
+    // DELETE: api/slas/{id}
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _slaService.DeleteAsync(id);
+        return NoContent();
+    }
+}
+
+============================================================
+FILE: ./Controllers/TenantsController.cs
+============================================================
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Dto.Tenant;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class TenantsController(TenantService tenantService) : ControllerBase
+{
+    private readonly TenantService _tenantService = tenantService;
+
+    // POST: api/tenants
+    [HttpPost]
+    public async Task<ActionResult<TenantResponseDto>> Create(CreateTenantDto dto)
+    {
+        var tenant = await _tenantService.CreateAsync(dto);
+
+        return CreatedAtAction(nameof(GetById),new { id = tenant.TenantId },tenant);
+    }
+
+    // GET: api/tenants
+    [HttpGet]
+    public async Task<ActionResult<IEnumerable<TenantListDto>>> GetAll()
+    {
+        var tenants = await _tenantService.GetAllAsync();
+
+        return Ok(tenants);
+    }
+
+    // GET: api/tenants/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<TenantResponseDto>> GetById(Guid id)
+    {
+        var tenant = await _tenantService.GetByIdAsync(id);
+
+        return Ok(tenant);
+    }
+
+    // PUT: api/tenants/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<TenantResponseDto>> Update(
+        Guid id,
+        UpdateTenantDto dto)
+    {
+        var tenant = await _tenantService.UpdateAsync(id, dto);
+
+        return Ok(tenant);
+    }
+
+    // PUT: api/tenants/{id}/status
+    [HttpPut("{id:guid}/status")]
+    public async Task<IActionResult> ChangeStatus( Guid id,ChangeTenantStatusDto dto)
+    {
+        await _tenantService.ChangeStatusAsync(id, dto);
+
+        return NoContent();
+    }
+
+    // PUT: api/tenants/{id}/plan
+    [HttpPut("{id:guid}/plan")]
+    public async Task<IActionResult> ChangePlan(Guid id,ChangeTenantPlanDto dto)
+    {
+        await _tenantService.ChangePlanAsync(id, dto);
+
+        return NoContent();
+    }
+
+    // DELETE: api/tenants/{id}
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _tenantService.DeleteAsync(id);
+
+        return NoContent();
+    }
+
+
+}
+
+
+
+============================================================
+FILE: ./Controllers/TicketsController.cs
+============================================================
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Ticket;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class TicketsController(TicketService _ticketService) : ControllerBase
+{
+    // POST: api/tickets
+    [HttpPost]
+    public async Task<ActionResult<TicketResponseDto>> Create(CreateTicketDto dto)
+    {
+        var ticket = await _ticketService.CreateAsync(dto);
+
+        return CreatedAtAction(
+            nameof(GetById),
+            new { id = ticket.TicketId },
+            ticket);
+    }
+
+    // GET: api/tickets/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<TicketResponseDto>> GetById(Guid id)
+    {
+        var ticket = await _ticketService.GetByIdAsync(id);
+
+        return Ok(ticket);
+    }
+
+    // GET: api/tickets?status=Open&categoryId=...&page=1&pageSize=20
+    [HttpGet]
+    public async Task<ActionResult<PagedResult<TicketResponseDto>>> GetFiltered([FromQuery] TicketFilter filter)
+    {
+        var result = await _ticketService.GetFilteredAsync(filter);
+
+        return Ok(result);
+    }
+
+    // PUT: api/tickets/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<TicketResponseDto>> UpdateDetails(Guid id, UpdateTicketDto dto)
+    {
+        var ticket = await _ticketService.UpdateDetailsAsync(id, dto);
+
+        return Ok(ticket);
+    }
+
+    // PATCH: api/tickets/{id}/status
+    [HttpPatch("{id:guid}/status")]
+    public async Task<ActionResult<TicketResponseDto>> ChangeStatus(Guid id, ChangeTicketStatusDto dto)
+    {
+        var ticket = await _ticketService.ChangeStatusAsync(id, dto.Status);
+
+        return Ok(ticket);
+    }
+
+    // PATCH: api/tickets/{id}/assign
+    [HttpPatch("{id:guid}/assign")]
+    public async Task<ActionResult<TicketResponseDto>> Assign(Guid id, AssignTicketDto dto)
+    {
+        var ticket = await _ticketService.AssignAsync(id, dto.AssignedTo);
+
+        return Ok(ticket);
+    }
+
+    // PATCH: api/tickets/{id}/close
+    [HttpPatch("{id:guid}/close")]
+    public async Task<ActionResult<TicketResponseDto>> Close(Guid id)
+    {
+        var ticket = await _ticketService.CloseAsync(id);
+
+        return Ok(ticket);
+    }
+}
+
+============================================================
+FILE: ./Controllers/UsersController.cs
+============================================================
+using Microsoft.AspNetCore.Mvc;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.User;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Application.Services;
+
+namespace TenantDesk.Api.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class UsersController(UserService _userService) : ControllerBase
+{
+
+    
+
+    // GET: api/users/{id}
+    [HttpGet("{id:guid}")]
+    public async Task<ActionResult<UserResponseDto>> GetById(Guid id)
+    {
+        var user = await _userService.GetByIdAsync(id);
+
+        return Ok(user);
+    }
+
+    // GET: api/users?role=Agent&isActive=true&page=1&pageSize=20
+    [HttpGet]
+    public async Task<ActionResult<PagedResult<UserResponseDto>>> GetFiltered([FromQuery] UserFilter filter)
+    {
+        var result = await _userService.GetFilteredAsync(filter);
+
+        return Ok(result);
+    }
+
+    // PUT: api/users/{id}
+    [HttpPut("{id:guid}")]
+    public async Task<ActionResult<UserResponseDto>> Update(Guid id, UpdateUserDto dto)
+    {
+        var user = await _userService.UpdateAsync(id, dto);
+
+        return Ok(user);
+    }
+
+    // PUT: api/users/{id}/status
+    [HttpPut("{id:guid}/status")]
+    public async Task<IActionResult> ChangeStatus(Guid id, ChangeUserStatusDto dto)
+    {
+        await _userService.ChangeStatusAsync(id, dto);
+
+        return NoContent();
+    }
+
+    // DELETE: api/users/{id}
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        await _userService.DeleteAsync(id);
+
+        return NoContent();
+    }
+}
+
+============================================================
+FILE: ./Middleware/ExceptionMiddleware.cs
+============================================================
+namespace TenantDesk.Api.Middleware;
+
+public class ExceptionMiddleware(
+    RequestDelegate next,
+    ILogger<ExceptionMiddleware> logger)
+{
+    private readonly RequestDelegate _next = next;
+    private readonly ILogger<ExceptionMiddleware> _logger = logger;
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            await _next(context);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unhandled exception");
+
+            context.Response.ContentType = "application/json";
+
+            context.Response.StatusCode = ex switch
+            {
+                KeyNotFoundException => StatusCodes.Status404NotFound,
+
+                UnauthorizedAccessException => StatusCodes.Status403Forbidden,
+
+                InvalidOperationException => StatusCodes.Status409Conflict,
+
+                _ => StatusCodes.Status400BadRequest
+            };
+
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = ex.Message
+            });
+        }
+    }
+    
+}
+
+============================================================
+FILE: ./Program.cs
+============================================================
+using Microsoft.EntityFrameworkCore;
+using TenantDesk.Application.Common.Interfaces;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Infrastructure.Data;
+using TenantDesk.Application.Services;
+using TenantDesk.Infrastructure.Repositories;
+using TenantDesk.Infrastructure.Identity;
+using TenantDesk.Infrastructure.Services;
+using TenantDesk.Api.Middleware;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.IdentityModel.Tokens;
+using TenantDesk.Domain.Entities;
+using System.Text;
+using TenantDesk.Application.Mapping;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+        Scheme = "Bearer",
+        BearerFormat = "JWT",
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Description = "Enter: Bearer {your JWT token}"
+    });
+
+    options.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    {
+        {
+            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            {
+                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                {
+                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
+
+var connectionString =
+    builder.Configuration.GetConnectionString("DefaultConnection");
+
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseMySql(
+        connectionString,
+        ServerVersion.AutoDetect(connectionString)
+    )
+);
+builder.Services.AddAutoMapper(typeof(UserMappingProfile).Assembly);
+builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+builder.Services.AddScoped<ICommentRepository, CommentRepository>();
+builder.Services.AddScoped<CommentService>();
+builder.Services.AddMemoryCache();
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration =
+        builder.Configuration["Redis:ConnectionString"];
+
+    options.InstanceName = "TenantDesk:";
+});
+// --- from development: Plan + Tenant (Phase 2) ---
+builder.Services.AddScoped<IPlanRepository, PlanRepository>();
+builder.Services.AddScoped<PlanService>();
+builder.Services.AddScoped<ITenantRepository, TenantRepository>();
+builder.Services.AddScoped<TenantService>();
+// --- end Phase 2 ---
+builder.Services.AddScoped<ITicketRepository, TicketRepository>();
+builder.Services.AddScoped<ICommentRepository, CommentRepository>();
+builder.Services.AddScoped<CommentService>();
+builder.Services.AddScoped<ISlaRepository, SlaRepository>();
+builder.Services.AddScoped<SlaService>();
+builder.Services.AddScoped<TicketService>();
+builder.Services.AddScoped<DashboardService>();
+builder.Services.AddScoped<IBusinessHourRepository, BusinessHourRepository>();
+builder.Services.AddScoped<BusinessHourService>();
+builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
+builder.Services.AddScoped<IDateTimeProvider, DateTimeProvider>();
+builder.Services.AddScoped<ISlaCalculatorService, SlaCalculatorService>();
+
+builder.Services.AddScoped<INotificationRepository, NotificationRepository>();
+builder.Services.AddScoped<INotificationDispatcher, NotificationDispatcher>();
+builder.Services.AddScoped<IEmailService, EmailService>();
+
+
+builder.Services.AddHttpContextAccessor();
+
+builder.Services.AddScoped<ICategoryRepository, CategoryRepository>();   
+builder.Services.AddScoped<CategoryService>();                            
+
+// --- JWT Authentication setup ---
+var jwtSection = builder.Configuration.GetSection("Jwt");
+var jwtKey = jwtSection["Key"]!;
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = jwtSection["Issuer"],
+            ValidateAudience = true,
+            ValidAudience = jwtSection["Audience"],
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromMinutes(1)
+        };
+    });
+
+builder.Services.AddAuthorization();
+// --- end JWT Authentication setup ---
+
+// --- Application services (Phase 3: Auth + User) ---
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddScoped<UserService>();
+builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
+builder.Services.AddScoped<ICurrentTenantService, CurrentTenantService>();
+builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<ITokenService, TokenService>();
+builder.Services.AddScoped<IPasswordHasher<User>, PasswordHasher<User>>();
+// --- end Application services ---
+
+var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseMiddleware<ExceptionMiddleware>();
+
+app.UseHttpsRedirection();
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
+
+app.Run();

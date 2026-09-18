@@ -561,7 +561,7 @@ namespace TenantDesk.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("TenantDesk.Domain.Entities.Sla", null)
+                    b.HasOne("TenantDesk.Domain.Entities.Sla", "Sla")
                         .WithMany()
                         .HasForeignKey("SlaId")
                         .OnDelete(DeleteBehavior.Restrict)
@@ -572,6 +572,8 @@ namespace TenantDesk.Infrastructure.Migrations
                         .HasForeignKey("TenantId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.Navigation("Sla");
                 });
 
             modelBuilder.Entity("TenantDesk.Domain.Entities.TicketFeedback", b =>

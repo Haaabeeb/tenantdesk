@@ -1,16 +1,13 @@
-
-using System.Net.Mail;
 using TenantDesk.Application.Common;
-using TenantDesk.Application.Dto.Attachment;
 using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Domain.Entities;
 
-public interface IAttachementRepository{
-    
-    public Task<Attachment> GetIdByAsync(Guid id);
-    public Task<long> GetTotalSizeByTenantAsync(Guid tenantId);
-    public Task<long> GetTotalSizeByTicketAsync(Guid ticketId);
-    public Task AddAsync(Attachment attachment);
-    public Task DeleteAsync();
-    public Task ExistsAsync();
+namespace TenantDesk.Application.Interfaces.Persistence;
+
+public interface IAttachementRepository
+{
+    Task<Attachment?> GetByIdAsync(Guid id);
+    Task AddAsync(Attachment attachment);
+    Task DeleteAsync(Guid id);
     Task<PagedResult<Attachment>> GetFilteredAsync(AttachmentFilter filter);
 }

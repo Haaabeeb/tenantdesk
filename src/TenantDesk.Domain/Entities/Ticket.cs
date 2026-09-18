@@ -86,5 +86,7 @@ namespace TenantDesk.Domain.Entities
             UpdatedAt = DateTime.UtcNow;
         }
     }
+
 }
+
 

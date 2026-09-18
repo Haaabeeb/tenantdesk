@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using AutoMapper;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 using Moq;
 using TenantDesk.Application.Dto.Sla;
 using TenantDesk.Application.Interfaces;
@@ -20,6 +22,8 @@ public class SlaServiceTests
     private readonly Mock<ISlaRepository> _slaRepoMock;
     private readonly Mock<ICurrentTenantService> _currentTenantServiceMock;
     private readonly Mock<IMapper> _mapperMock;
+    private readonly IMemoryCache _memoryCache;
+    private readonly Mock<ILogger<SlaService>> _loggerMock;
     private readonly SlaService _sut;
     private readonly Guid _currentTenantId;
 
@@ -28,6 +32,8 @@ public class SlaServiceTests
         _slaRepoMock = new Mock<ISlaRepository>();
         _currentTenantServiceMock = new Mock<ICurrentTenantService>();
         _mapperMock = new Mock<IMapper>();
+        _memoryCache = new MemoryCache(new MemoryCacheOptions());
+        _loggerMock = new Mock<ILogger<SlaService>>();
 
         _currentTenantId = Guid.NewGuid();
         _currentTenantServiceMock.Setup(c => c.GetTenantId()).Returns(_currentTenantId);
@@ -35,7 +41,9 @@ public class SlaServiceTests
         _sut = new SlaService(
             _slaRepoMock.Object,
             _currentTenantServiceMock.Object,
-            _mapperMock.Object);
+            _mapperMock.Object,
+            _memoryCache,
+            _loggerMock.Object);
     }
 
     [Fact]

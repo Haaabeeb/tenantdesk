@@ -1,0 +1,1276 @@
+-e 
+
+===== ./SlaCalculatorService.cs =====
+
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Services;
+
+public class SlaCalculatorService(ITicketRepository _ticketRepository, ISlaRepository _slaRepository, IBusinessHourRepository _businessHourRepository, IDateTimeProvider _dateTimeProvider) : ISlaCalculatorService
+{
+    
+
+    private const int MaxDaySearchWindow = 365;
+
+    public async Task<DateTime> CalculateResponseDueAsync(Guid ticketId)
+    {
+        var ticket = await GetTicketOrThrowAsync(ticketId);
+        var sla = await GetSlaOrThrowAsync(ticket);
+
+        return await CalculateDueDateAsync(ticket, sla.ResponseTime);
+    }
+
+    public async Task<DateTime> CalculateResolutionDueAsync(Guid ticketId)
+    {
+        var ticket = await GetTicketOrThrowAsync(ticketId);
+        return await CalculateResolutionDueInternalAsync(ticket);
+    }
+
+    public async Task<bool> IsBreachedAsync(Guid ticketId)
+    {
+        var ticket = await GetTicketOrThrowAsync(ticketId);
+        var resolutionDue = await CalculateResolutionDueInternalAsync(ticket);
+
+        var comparisonTime = ticket.Status == TicketStatus.Closed
+            ? ticket.UpdatedAt
+            : _dateTimeProvider.UtcNow;
+
+        return comparisonTime > resolutionDue;
+    }
+
+    private async Task<DateTime> CalculateResolutionDueInternalAsync(Ticket ticket)
+    {
+        var sla = await GetSlaOrThrowAsync(ticket);
+        return await CalculateDueDateAsync(ticket, sla.ResolutionTime);
+    }
+
+    private async Task<DateTime> CalculateDueDateAsync(Ticket ticket, int minutesToAllocate)
+    {
+        var businessHours = await _businessHourRepository.GetByTenantAsync(ticket.TenantId);
+
+        var workingDaysMap = businessHours
+            .Where(b => b.IsWorkingDay)
+            .ToDictionary(b => b.DayOfWeek);
+
+        if (workingDaysMap.Count == 0)
+            return ticket.CreatedAt.AddMinutes(minutesToAllocate);
+
+        var currentPointer = ticket.CreatedAt;
+        var remainingTime = TimeSpan.FromMinutes(minutesToAllocate);
+
+        for (var i = 0; i < MaxDaySearchWindow; i++)
+        {
+            if (!workingDaysMap.TryGetValue(currentPointer.DayOfWeek, out var todayHours))
+            {
+                currentPointer = currentPointer.Date.AddDays(1);
+                continue;
+            }
+
+            var openTime = todayHours.OpenTime!.Value.ToTimeSpan();
+            var closeTime = todayHours.CloseTime!.Value.ToTimeSpan();
+            var currentTimeOfDay = currentPointer.TimeOfDay;
+
+            if (currentTimeOfDay < openTime)
+            {
+                currentPointer = currentPointer.Date.Add(openTime);
+                currentTimeOfDay = openTime;
+            }
+
+            if (currentTimeOfDay >= closeTime)
+            {
+                currentPointer = currentPointer.Date.AddDays(1);
+                continue;
+            }
+
+            var availableTimeToday = closeTime - currentTimeOfDay;
+
+            if (remainingTime <= availableTimeToday)
+                return currentPointer.Add(remainingTime);
+
+            remainingTime -= availableTimeToday;
+            currentPointer = currentPointer.Date.AddDays(1);
+        }
+
+        throw new InvalidOperationException("Could not calculate SLA due date within the maximum search window (365 days). Check the tenant's business hour configuration.");
+    }
+
+    private async Task<Ticket> GetTicketOrThrowAsync(Guid ticketId)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(ticketId);
+        if (ticket is null)
+            throw new KeyNotFoundException($"Ticket '{ticketId}' not found.");
+
+        return ticket;
+    }
+
+    private async Task<Sla> GetSlaOrThrowAsync(Ticket ticket)
+    {
+        var sla = await _slaRepository.GetByIdAsync(ticket.SlaId);
+        if (sla is null)
+            throw new KeyNotFoundException($"SLA '{ticket.SlaId}' referenced by ticket '{ticket.TicketId}' was not found.");
+
+        return sla;
+    }
+    
+
+
+}-e 
+
+===== ./AttachmentService.cs =====
+
+
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Attachment;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Mapping;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class AttachmentService(
+    IAttachementRepository _attachmentRepository,
+    ITicketRepository _ticketRepository,
+    IFileStorageService _fileStorageService,
+    ICurrentTenantService _currentTenantService,
+    ICurrentUserService _currentUserService)
+{
+        public async Task<AttachmentResponseDto> CreateAsync(Guid ticketId, CreateAttachmentDto dto, Stream fileStream)
+    {
+        await EnsureCanAccessTicketAsync(ticketId);
+
+        var tenantId = _currentTenantService.GetTenantId();
+        var userId = _currentUserService.GetUserId();
+
+        var storagePath = $"{tenantId}/{ticketId}/{Guid.NewGuid()}_{dto.FileName}";
+
+        await _fileStorageService.UploadAsync(fileStream, storagePath);
+
+        var attachment = new Attachment(
+            tenantId, ticketId, dto.CommentId, userId,
+            storagePath, dto.FileName, dto.FileSize);
+
+        await _attachmentRepository.AddAsync(attachment);
+
+        return attachment.ToDto();
+    }
+
+    public async Task<PagedResult<AttachmentResponseDto>> GetByTicketAsync(Guid ticketId, AttachmentFilter filter)
+    {
+        await EnsureCanAccessTicketAsync(ticketId);
+
+        filter.TenantId = _currentTenantService.GetTenantId();
+        filter.TicketId = ticketId;
+
+        var result = await _attachmentRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<AttachmentResponseDto>
+        {
+            Items = result.Items.Select(a => a.ToDto()).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var attachment = await _attachmentRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Attachment with ID '{id}' not found.");
+
+        if (attachment.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access attachments from another tenant.");
+
+        var userId = _currentUserService.GetUserId();
+        if (attachment.UploadedBy != userId)
+            throw new UnauthorizedAccessException("You can only delete attachments you uploaded.");
+
+        await _fileStorageService.DeleteAsync(attachment.StoragePath);
+        await _attachmentRepository.DeleteAsync(id);
+    }
+
+    private async Task EnsureCanAccessTicketAsync(Guid ticketId)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(ticketId)
+            ?? throw new KeyNotFoundException($"Ticket with ID '{ticketId}' not found.");
+
+        if (ticket.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access tickets from another tenant.");
+
+        var role = _currentUserService.GetUserRole();
+        var userId = _currentUserService.GetUserId();
+
+        if (role == UserRole.Customer && ticket.CreatedBy != userId)
+            throw new UnauthorizedAccessException("You cannot access a ticket you did not create.");
+
+        if (role == UserRole.Agent && ticket.AssignedTo != userId)
+            throw new UnauthorizedAccessException("You can only access tickets assigned to you.");
+
+        // Admin: no additional restriction.
+    }
+}-e 
+
+===== ./SlaService.cs =====
+
+using System.Diagnostics.CodeAnalysis;
+using AutoMapper;
+using TenantDesk.Application.Dto.Sla;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class SlaService
+{
+    private readonly ISlaRepository _slaRepository;
+    private readonly ICurrentTenantService _currentTenantService;
+    private readonly IMapper _mapper;
+
+    public SlaService(ISlaRepository slaRepository,ICurrentTenantService currentTenantService,IMapper mapper)
+    {
+        _slaRepository = slaRepository;
+        _currentTenantService = currentTenantService;
+        _mapper = mapper;
+    }
+
+    public async Task<SlaResponseDto> CreateAsync(CreateSlaDto dto)
+    {
+        if (dto.ResponseTime > dto.ResolutionTime)
+            throw new ArgumentException("Response time cannot be greater than resolution time.");
+
+        var tenantId = _currentTenantService.GetTenantId();
+
+        var existing = await _slaRepository.GetByTenantAndPriorityAsync(tenantId, dto.Priority);
+        if (existing is not null)
+            throw new InvalidOperationException($"An SLA for priority '{dto.Priority}' already exists for this tenant.");
+
+        var sla = new Sla(tenantId, dto.Priority, dto.ResponseTime, dto.ResolutionTime);
+        await _slaRepository.AddAsync(sla);
+
+        return _mapper.Map<SlaResponseDto>(sla);
+    }
+
+    public async Task<SlaResponseDto> GetByIdAsync(Guid id)
+    {
+        var sla = await _slaRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(sla);
+
+        return _mapper.Map<SlaResponseDto>(sla);
+    }
+
+    public async Task<SlaResponseDto> GetByPriorityAsync(PriorityLevel priority)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+       
+        var sla = await _slaRepository.GetByTenantAndPriorityAsync(tenantId, priority);
+
+        if (sla == null){
+            throw new KeyNotFoundException($"No SLA configured for priority '{priority}'.");
+        }
+
+        return _mapper.Map<SlaResponseDto>(sla);
+    }
+
+    public async Task<IEnumerable<SlaResponseDto>> GetAllAsync()
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var slas = await _slaRepository.GetAllByTenantAsync(tenantId);
+
+        return _mapper.Map<IEnumerable<SlaResponseDto>>(slas);
+    }
+
+    public async Task<SlaResponseDto> UpdateAsync(Guid id, UpdateSlaTimesDto dto)
+    {
+        if (dto.ResponseTime > dto.ResolutionTime)
+            throw new ArgumentException("Response time cannot be greater than resolution time.");
+
+        var sla = await _slaRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(sla);
+
+        sla.UpdateTimes(dto.ResponseTime, dto.ResolutionTime);
+        await _slaRepository.UpdateAsync(sla);
+
+        return _mapper.Map<SlaResponseDto>(sla);
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var sla = await _slaRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(sla);
+
+        await _slaRepository.DeleteAsync(id);
+    }
+
+    private void EnsureExistsAndOwned([NotNull] Sla? sla)
+    {
+        if (sla is null)
+            throw new KeyNotFoundException("SLA not found.");
+
+        if (sla.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access resources belonging to another tenant.");
+    }
+
+
+}-e 
+
+===== ./NotificationDispatcher.cs =====
+
+
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class NotificationDispatcher(INotificationRepository notificationRepository,ICurrentTenantService currentTenantService) : INotificationDispatcher
+{
+    private readonly INotificationRepository _notificationRepository = notificationRepository;
+    private readonly ICurrentTenantService _currentTenantService = currentTenantService;
+
+    public async Task DispatchAsync(Guid userId, NotificationType type, string message, Guid? ticketId)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        
+        var notification = new Notification(
+            tenantId: tenantId,
+            userId: userId,
+            type: type,
+            message: message,
+            ticketId: ticketId);
+
+        await _notificationRepository.AddAsync(notification);
+    }
+}-e 
+
+===== ./UserService.cs =====
+
+using AutoMapper;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.User;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Services;
+
+public class UserService(IUserRepository _userRepository, ICurrentTenantService _currentTenantService,IMapper _mapper)
+{
+    
+
+    
+    public async Task<UserResponseDto> GetByIdAsync(Guid id)
+    {
+        var user = await _userRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"User with ID '{id}' not found.");
+
+        // tenant scoping: ما بنسمح تشوف مستخدم tenant تاني
+        if (user.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access users from another tenant.");
+
+        return _mapper.Map<UserResponseDto>(user);
+    }
+
+    public async Task<PagedResult<UserResponseDto>> GetFilteredAsync(UserFilter filter)
+    {
+        // tenant scoping: بنفرض TenantId المستخدم الحالي، مش يلي المستخدم بعته بالـ query
+        filter.TenantId = _currentTenantService.GetTenantId();
+
+        var result = await _userRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<UserResponseDto>
+        {
+            Items = result.Items.Select(MapToResponseDto).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<UserResponseDto> UpdateAsync(Guid id, UpdateUserDto dto)
+    {
+        var user = await _userRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"User with ID '{id}' not found.");
+
+        if (user.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot modify users from another tenant.");
+
+        var normalizedEmail = dto.Email.Trim().ToLower();
+
+        if (!string.Equals(user.Email, normalizedEmail, StringComparison.OrdinalIgnoreCase))
+        {
+            var emailTaken = await _userRepository.ExistsByEmailAsync(user.TenantId, normalizedEmail);
+            if (emailTaken)
+                throw new InvalidOperationException("A user with this email already exists in this tenant.");
+        }
+
+        user.ChangeEmail(normalizedEmail);
+        user.ChangeRole(dto.Role);
+
+        await _userRepository.UpdateAsync(user);
+
+        return _mapper.Map<UserResponseDto>(user);
+    }
+
+    public async Task ChangeStatusAsync(Guid id, ChangeUserStatusDto dto)
+    {
+        var user = await _userRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"User with ID '{id}' not found.");
+
+        if (user.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot modify users from another tenant.");
+
+        if (dto.IsActive)
+            user.Activate();
+        else
+            user.Deactivate();
+
+        await _userRepository.UpdateAsync(user);
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var user = await _userRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"User with ID '{id}' not found.");
+
+        if (user.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot delete users from another tenant.");
+
+        await _userRepository.DeleteAsync(id);
+    }
+
+    private static UserResponseDto MapToResponseDto(User user)
+    {
+        return new UserResponseDto(
+            user.UserId,
+            user.TenantId,
+            user.Email,
+            user.Role,
+            user.IsActive,
+            user.CreatedAt,
+            user.UpdatedAt);
+    }
+}-e 
+
+===== ./Ticketservice.cs =====
+
+using AutoMapper;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Ticket;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class TicketService(
+    ITicketRepository _ticketRepository,
+    ICategoryRepository _categoryRepository,
+    ISlaRepository _slaRepository,
+    ICurrentTenantService _currentTenantService,
+    ICurrentUserService _currentUserService,
+    INotificationDispatcher _notificationDispatcher,
+    IMapper _mapper)
+{
+    public async Task<TicketResponseDto> CreateAsync(CreateTicketDto dto)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var userId = _currentUserService.GetUserId();
+
+        var category = await _categoryRepository.GetByIdAsync(dto.CategoryId)
+            ?? throw new KeyNotFoundException($"Category with ID '{dto.CategoryId}' not found.");
+
+        if (category.TenantId != tenantId)
+            throw new UnauthorizedAccessException("You cannot use a category from another tenant.");
+
+        var sla = await _slaRepository.GetByIdAsync(dto.SlaId)
+            ?? throw new KeyNotFoundException($"SLA with ID '{dto.SlaId}' not found.");
+
+        if (sla.TenantId != tenantId)
+            throw new UnauthorizedAccessException("You cannot use an SLA from another tenant.");
+
+        var ticket = new Ticket(tenantId, dto.CategoryId, dto.SlaId, userId, dto.Title, dto.Description);
+
+        await _ticketRepository.AddAsync(ticket);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> GetByIdAsync(Guid id)
+    {
+        var ticket = await GetOwnedTicketAsync(id);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<PagedResult<TicketResponseDto>> GetFilteredAsync(TicketFilter filter)
+    {
+        filter.TenantId = _currentTenantService.GetTenantId();
+
+        // Customers only ever see their own tickets, regardless of what they pass in the query.
+        if (_currentUserService.GetUserRole() == UserRole.Customer)
+            filter.CreatedBy = _currentUserService.GetUserId();
+
+        var result = await _ticketRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<TicketResponseDto>
+        {
+            Items = result.Items.Select(t => _mapper.Map<TicketResponseDto>(t)).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<TicketResponseDto> UpdateDetailsAsync(Guid id, UpdateTicketDto dto)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.UpdateDetails(dto.Title, dto.Description);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' was updated.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> ChangeStatusAsync(Guid id, TicketStatus newStatus)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.ChangeStatus(newStatus);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' status changed to {newStatus}.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> AssignAsync(Guid id, Guid assigneeUserId)
+    {
+        var ticket = await GetOwnedTicketAsync(id, agentOrAdminOnly: true);
+
+        ticket.AssignTo(assigneeUserId);
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            assigneeUserId, NotificationType.TicketAssigned, $"You have been assigned ticket '{ticket.Title}'.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    public async Task<TicketResponseDto> CloseAsync(Guid id)
+    {
+        // Agent/Admin can close any ticket assigned to them; a Customer can only close their own.
+        var ticket = await GetOwnedTicketAsync(id);
+
+        ticket.Close();
+
+        await _ticketRepository.UpdateAsync(ticket);
+
+        await _notificationDispatcher.DispatchAsync(
+            ticket.CreatedBy, NotificationType.TicketUpdated, $"Your ticket '{ticket.Title}' was closed.", ticket.TicketId);
+
+        return _mapper.Map<TicketResponseDto>(ticket);
+    }
+
+    private async Task<Ticket> GetOwnedTicketAsync(Guid id, bool agentOrAdminOnly = false)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Ticket with ID '{id}' not found.");
+
+        if (ticket.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access tickets from another tenant.");
+
+        var role = _currentUserService.GetUserRole();
+        var userId = _currentUserService.GetUserId();
+
+        if (role == UserRole.Customer)
+        {
+            if (ticket.CreatedBy != userId)
+                throw new UnauthorizedAccessException("You cannot access a ticket you did not create.");
+
+            if (agentOrAdminOnly)
+                throw new UnauthorizedAccessException("Only an agent or admin can perform this action.");
+        }
+        else if (role == UserRole.Agent && agentOrAdminOnly)
+        {
+            // Agent can only modify tickets assigned to them; Admin is exempt from this check entirely.
+            if (ticket.AssignedTo != userId)
+                throw new UnauthorizedAccessException("You can only modify tickets assigned to you.");
+        }
+
+        return ticket;
+    }
+}-e 
+
+===== ./CommentService.cs =====
+
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Comment;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence.Filters;
+using TenantDesk.Application.Mapping;
+using TenantDesk.Domain.Entities;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class CommentService(
+    ICommentRepository _commentRepository,
+    ITicketRepository _ticketRepository,
+    ICurrentTenantService _currentTenantService,
+    ICurrentUserService _currentUserService)
+{
+    public async Task<CommentResponseDto> CreateAsync(Guid ticketId, CreateCommentDto dto)
+    {
+        await EnsureCanAccessTicketAsync(ticketId);
+
+        var tenantId = _currentTenantService.GetTenantId();
+        var userId = _currentUserService.GetUserId();
+
+        var comment = new Comment(tenantId, ticketId, userId, dto.Content);
+
+        await _commentRepository.AddAsync(comment);
+
+        return comment.ToDto();
+    }
+
+    public async Task<PagedResult<CommentResponseDto>> GetByTicketAsync(Guid ticketId, CommentFilter filter)
+    {
+        await EnsureCanAccessTicketAsync(ticketId);
+
+        filter.TenantId = _currentTenantService.GetTenantId();
+        filter.TicketId = ticketId;
+
+        var result = await _commentRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<CommentResponseDto>
+        {
+            Items = result.Items.Select(c => c.ToDto()).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<CommentResponseDto> UpdateAsync(Guid id, UpdateCommentDto dto)
+    {
+        var comment = await GetOwnedCommentAsync(id);
+
+        var userId = _currentUserService.GetUserId();
+        if (comment.UserId != userId)
+            throw new UnauthorizedAccessException("You can only edit your own comments.");
+
+        comment.UpdateContent(dto.Content);
+
+        await _commentRepository.UpdateAsync(comment);
+
+        return comment.ToDto();
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var comment = await GetOwnedCommentAsync(id);
+
+        var userId = _currentUserService.GetUserId();
+        var role = _currentUserService.GetUserRole();
+
+        if (comment.UserId != userId && role != UserRole.Admin)
+            throw new UnauthorizedAccessException("You can only delete your own comments.");
+
+        await _commentRepository.DeleteAsync(id);
+    }
+
+    
+    private async Task<Comment> GetOwnedCommentAsync(Guid id)
+    {
+        var comment = await _commentRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Comment with ID '{id}' not found.");
+
+        if (comment.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access comments from another tenant.");
+
+        return comment;
+    }
+
+
+    private async Task EnsureCanAccessTicketAsync(Guid ticketId)
+    {
+        var ticket = await _ticketRepository.GetByIdAsync(ticketId)
+            ?? throw new KeyNotFoundException($"Ticket with ID '{ticketId}' not found.");
+
+        if (ticket.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access tickets from another tenant.");
+
+        var role = _currentUserService.GetUserRole();
+        var userId = _currentUserService.GetUserId();
+
+        if (role == UserRole.Customer && ticket.CreatedBy != userId)
+            throw new UnauthorizedAccessException("You cannot access a ticket you did not create.");
+
+        if (role == UserRole.Agent && ticket.AssignedTo != userId)
+            throw new UnauthorizedAccessException("You can only access tickets assigned to you.");
+
+        // Admin: no additional restriction.
+    }
+}-e 
+
+===== ./TenantService.cs =====
+
+using AutoMapper;
+using TenantDesk.Application.Dto.Tenant;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Services;
+
+public class TenantService(ITenantRepository tenantRepository,IPlanRepository planRepository,IMapper mapper)
+{
+    private readonly ITenantRepository _tenantRepository = tenantRepository;
+    private readonly IPlanRepository _planRepository = planRepository;
+    private readonly IMapper _mapper = mapper;
+
+    public async Task<TenantResponseDto> CreateAsync(CreateTenantDto dto)
+    {
+        var plan = await _planRepository.GetByIdAsync(dto.PlanId);
+
+        if (plan is null)
+            throw new KeyNotFoundException("Plan not found.");
+
+        var subdomainExists = await _tenantRepository.ExistsBySubdomainAsync(dto.Subdomain.Trim().ToLowerInvariant());
+
+        if (subdomainExists)
+            throw new InvalidOperationException("Subdomain is already in use.");
+
+        var tenant = new Tenant(dto.PlanId,dto.TenantName,dto.Subdomain);
+
+        await _tenantRepository.AddAsync(tenant);
+
+        return _mapper.Map<TenantResponseDto>(tenant);
+    }
+
+    public async Task<TenantResponseDto?> GetByIdAsync(Guid id)
+    {
+        var tenant = await _tenantRepository.GetByIdAsync(id);
+
+        if (tenant is null)
+            throw new KeyNotFoundException($"Tenant with ID '{id}' not found.");
+
+        return _mapper.Map<TenantResponseDto>(tenant);
+    }
+
+    public async Task<IEnumerable<TenantListDto>> GetAllAsync()
+    {
+        var tenants = await _tenantRepository.GetAllAsync();
+
+        return _mapper.Map<IEnumerable<TenantListDto>>(tenants);
+    }
+
+    public async Task<TenantResponseDto> UpdateAsync(Guid id,UpdateTenantDto dto)
+    {
+        var tenant = await _tenantRepository.GetByIdAsync(id);
+
+        if (tenant is null)
+            throw new KeyNotFoundException("Tenant not found.");
+
+        var normalizedSubdomain =
+            dto.Subdomain.Trim().ToLowerInvariant();
+
+        if (!string.Equals(tenant.Subdomain,normalizedSubdomain,StringComparison.OrdinalIgnoreCase))
+        {
+            var subdomainExists = await _tenantRepository.ExistsBySubdomainAsync(normalizedSubdomain);
+
+            if (subdomainExists)
+                throw new InvalidOperationException("Subdomain is already in use.");
+        }
+
+        tenant.Rename(dto.TenantName);
+        tenant.ChangeSubdomain(normalizedSubdomain);
+
+        await _tenantRepository.UpdateAsync(tenant);
+
+        return _mapper.Map<TenantResponseDto>(tenant);
+    }
+
+    public async Task ChangePlanAsync(Guid id,ChangeTenantPlanDto dto)
+    {
+        var tenant = await _tenantRepository.GetByIdAsync(id);
+
+        if (tenant is null)
+            throw new KeyNotFoundException("Tenant not found.");
+
+        var plan = await _planRepository.GetByIdAsync(dto.PlanId);
+
+        if (plan is null)
+            throw new KeyNotFoundException("Plan not found.");
+
+        tenant.ChangePlan(dto.PlanId);
+
+        await _tenantRepository.UpdateAsync(tenant);
+    }
+
+    public async Task ChangeStatusAsync(Guid id,ChangeTenantStatusDto dto)
+    {
+        var tenant = await _tenantRepository.GetByIdAsync(id);
+
+        if (tenant is null)
+            throw new KeyNotFoundException("Tenant not found.");
+
+        if (dto.IsActive)
+            tenant.Activate();
+        else
+            tenant.Deactivate();
+
+        await _tenantRepository.UpdateAsync(tenant);
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var tenant = await _tenantRepository.GetByIdAsync(id);
+
+        if (tenant is null)
+            throw new KeyNotFoundException("Tenant not found.");
+
+        await _tenantRepository.DeleteAsync(id);
+    }
+}-e 
+
+===== ./BusinessHourService.cs =====
+
+using System.Diagnostics.CodeAnalysis;
+using AutoMapper;
+using TenantDesk.Application.Dto.BusinessHour;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Services;
+
+public class BusinessHourService
+{
+    private readonly IBusinessHourRepository _businessHourRepository;
+    private readonly ICurrentTenantService _currentTenantService;
+    private readonly IMapper _mapper;
+
+    public BusinessHourService(IBusinessHourRepository businessHourRepository,ICurrentTenantService currentTenantService,IMapper mapper)
+    {
+        _businessHourRepository = businessHourRepository;
+        _currentTenantService = currentTenantService;
+        _mapper = mapper;
+    }
+
+    public async Task<BusinessHourResponseDto> CreateAsync(CreateBusinessHourDto dto)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+
+        var existing = await _businessHourRepository.GetByDayAsync(tenantId, dto.DayOfWeek);
+        if (existing is not null)
+            throw new InvalidOperationException($"A business hour record for '{dto.DayOfWeek}' already exists for this tenant.");
+
+        var businessHour = new BusinessHour(tenantId, dto.DayOfWeek, dto.OpenTime, dto.CloseTime);
+        await _businessHourRepository.AddAsync(businessHour);
+
+        return _mapper.Map<BusinessHourResponseDto>(businessHour);
+    }
+
+    public async Task<BusinessHourResponseDto> GetByIdAsync(Guid id)
+    {
+        var businessHour = await _businessHourRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(businessHour);
+
+        return _mapper.Map<BusinessHourResponseDto>(businessHour);
+    }
+
+    public async Task<BusinessHourResponseDto> GetByDayAsync(DayOfWeek day)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var businessHour = await _businessHourRepository.GetByDayAsync(tenantId, day);
+
+        if (businessHour == null)
+        {
+           throw new KeyNotFoundException($"No business hour configured for '{day}'.");
+        }
+        
+        return _mapper.Map<BusinessHourResponseDto>(businessHour);
+    }
+
+    public async Task<IEnumerable<BusinessHourResponseDto>> GetAllAsync()
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+        var businessHours = await _businessHourRepository.GetByTenantAsync(tenantId);
+
+        return _mapper.Map<IEnumerable<BusinessHourResponseDto>>(businessHours);
+    }
+
+    public async Task<BusinessHourResponseDto> UpdateAsync(Guid id, UpdateBusinessHourDto dto)
+    {
+        var businessHour = await _businessHourRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(businessHour);
+
+        businessHour.UpdateHours(dto.OpenTime, dto.CloseTime);
+        await _businessHourRepository.UpdateAsync(businessHour);
+
+        return _mapper.Map<BusinessHourResponseDto>(businessHour);
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var businessHour = await _businessHourRepository.GetByIdAsync(id);
+        EnsureExistsAndOwned(businessHour);
+
+        await _businessHourRepository.DeleteAsync(id);
+    }
+
+    private void EnsureExistsAndOwned([NotNull] BusinessHour? businessHour)
+    {
+        if (businessHour is null)
+            throw new KeyNotFoundException("Business hour record not found.");
+
+        if (businessHour.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access resources belonging to another tenant.");
+    }
+
+
+
+}-e 
+
+===== ./PlanService.cs =====
+
+using AutoMapper;
+using TenantDesk.Application.Dto.Plan;
+using TenantDesk.Application.Interfaces;
+using TenantDesk.Domain.Entities;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
+
+namespace TenantDesk.Application.Services;
+
+public class PlanService(
+    IPlanRepository _repository,
+    IMapper _mapper,
+    IMemoryCache _cache,
+    ILogger<PlanService> _logger)
+{
+    private const string PlansCacheKey = "plans";
+
+    public async Task<PlanResponseDto> CreateAsync(CreatePlanDto dto)
+    {
+        var existingPlan = await _repository.GetByNameAsync(dto.Name);
+
+        if (existingPlan is not null)
+            throw new InvalidOperationException(
+                $"A plan with the name '{dto.Name}' already exists.");
+
+        var plan = new Plan(dto.Name, dto.RateLimitPerMinute);
+
+        await _repository.AddAsync(plan);
+
+        _cache.Remove(PlansCacheKey);
+
+        _logger.LogInformation(
+            "Plans cache INVALIDATED after creating plan {PlanName}",
+            dto.Name);
+
+        return _mapper.Map<PlanResponseDto>(plan);
+    }
+
+    public async Task<PlanResponseDto> ChangeRateLimitAsync(
+        Guid planId,
+        ChangePlanRateLimitDto dto)
+    {
+        var plan = await _repository.GetByIdAsync(planId);
+
+        if (plan is null)
+        {
+            throw new KeyNotFoundException(
+                $"Plan with ID '{planId}' not found.");
+        }
+
+        plan.ChangeRateLimit(dto.RateLimitPerMinute);
+
+        await _repository.UpdateAsync(plan);
+
+        _cache.Remove(PlansCacheKey);
+
+        _logger.LogInformation(
+            "Plans cache INVALIDATED after changing rate limit for plan {PlanId}",
+            planId);
+
+        return _mapper.Map<PlanResponseDto>(plan);
+    }
+
+    public async Task DeleteAsync(Guid planId)
+    {
+        var plan = await _repository.GetByIdAsync(planId);
+
+        if (plan is null)
+        {
+            throw new KeyNotFoundException(
+                $"Plan with ID '{planId}' not found.");
+        }
+
+        await _repository.DeleteAsync(planId);
+
+        _cache.Remove(PlansCacheKey);
+
+        _logger.LogInformation(
+            "Plans cache INVALIDATED after deleting plan {PlanId}",
+            planId);
+    }
+
+     private readonly SemaphoreSlim _lock = new(1, 1);
+
+    public async Task<IEnumerable<PlanResponseDto>> GetAllAsync()
+        {
+            if (_cache.TryGetValue(PlansCacheKey, out IEnumerable<PlanResponseDto>? cachedPlans))
+                return cachedPlans!;
+
+            await _lock.WaitAsync();
+
+            try
+            {
+                if (_cache.TryGetValue(PlansCacheKey, out cachedPlans))
+                    return cachedPlans!;
+
+                var plans = await _repository.GetAllAsync();
+
+                var result = _mapper.Map<IEnumerable<PlanResponseDto>>(plans);
+
+                _cache.Set(PlansCacheKey, result, TimeSpan.FromMinutes(10));
+
+                return result;
+            }
+            finally
+            {
+                _lock.Release();
+            }
+        }
+
+
+    public async Task<PlanResponseDto> GetByIdAsync(Guid planId)
+    {
+        var plan = await _repository.GetByIdAsync(planId);
+
+        if (plan is null)
+        {
+            throw new KeyNotFoundException(
+                $"Plan with ID '{planId}' not found.");
+        }
+
+        return _mapper.Map<PlanResponseDto>(plan);
+    }
+
+    public async Task<PlanResponseDto> GetByNameAsync(string name)
+    {
+        var plan = await _repository.GetByNameAsync(name);
+
+        if (plan is null)
+        {
+            throw new KeyNotFoundException(
+                $"Plan with name '{name}' not found.");
+        }
+
+        return _mapper.Map<PlanResponseDto>(plan);
+    }
+}-e 
+
+===== ./DashboardService.cs =====
+
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Logging;
+using System.Text.Json;
+using TenantDesk.Application.Dto.Dashboard;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Domain.Enums;
+
+namespace TenantDesk.Application.Services;
+
+public class DashboardService(
+    ITicketRepository _ticketRepository,
+    ICurrentTenantService _currentTenantService,
+    IDistributedCache _cache,
+    ILogger<DashboardService> _logger)
+{
+    public async Task<DashboardResponseDto> GetAsync()
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+
+        var cacheKey = $"dashboard:{tenantId}";
+
+        var cachedDashboard = await _cache.GetStringAsync(cacheKey);
+
+        if (cachedDashboard is not null)
+        {
+            _logger.LogInformation(
+                "Dashboard cache HIT for tenant {TenantId}",
+                tenantId);
+
+            return JsonSerializer.Deserialize<DashboardResponseDto>(
+                cachedDashboard)!;
+        }
+
+        _logger.LogInformation(
+            "Dashboard cache MISS for tenant {TenantId}",
+            tenantId);
+
+        var totalTickets =
+            await _ticketRepository.CountByTenantAsync(tenantId);
+
+        var openTickets =
+            await _ticketRepository.CountByStatusAsync(
+                tenantId,
+                TicketStatus.Open);
+
+        var assignedTickets =
+            await _ticketRepository.CountByStatusAsync(
+                tenantId,
+                TicketStatus.Assigned);
+
+        var inProgressTickets =
+            await _ticketRepository.CountByStatusAsync(
+                tenantId,
+                TicketStatus.InProgress);
+
+        var closedTickets =
+            await _ticketRepository.CountByStatusAsync(
+                tenantId,
+                TicketStatus.Closed);
+
+        var dashboard = new DashboardResponseDto(
+            totalTickets,
+            openTickets,
+            assignedTickets,
+            inProgressTickets,
+            closedTickets
+        );
+
+        var serializedDashboard =
+            JsonSerializer.Serialize(dashboard);
+
+        await _cache.SetStringAsync(
+            cacheKey,
+            serializedDashboard,
+            new DistributedCacheEntryOptions
+            {
+                SlidingExpiration =
+                    TimeSpan.FromMinutes(5)
+            });
+
+        return dashboard;
+    }
+}-e 
+
+===== ./CategoryService.cs =====
+
+using AutoMapper;
+using TenantDesk.Application.Common;
+using TenantDesk.Application.Dto.Category;
+using TenantDesk.Application.Interfaces.Identity;
+using TenantDesk.Application.Interfaces.Persistence;
+using TenantDesk.Domain.Entities;
+
+namespace TenantDesk.Application.Services;
+
+public class CategoryService(ICategoryRepository _categoryRepository, ICurrentTenantService _currentTenantService, IMapper _mapper)
+{
+    public async Task<CategoryResponseDto> GetByIdAsync(Guid id)
+    {
+        var category = await _categoryRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Category with ID '{id}' not found.");
+
+        if (category.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot access categories from another tenant.");
+
+        return _mapper.Map<CategoryResponseDto>(category);
+    }
+
+    public async Task<PagedResult<CategoryResponseDto>> GetFilteredAsync(CategoryFilter filter)
+    {
+        filter.TenantId = _currentTenantService.GetTenantId();
+
+        var result = await _categoryRepository.GetFilteredAsync(filter);
+
+        return new PagedResult<CategoryResponseDto>
+        {
+            Items = result.Items.Select(c => _mapper.Map<CategoryResponseDto>(c)).ToList(),
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize
+        };
+    }
+
+    public async Task<CategoryResponseDto> CreateAsync(CreateCategoryDto dto)
+    {
+        var tenantId = _currentTenantService.GetTenantId();
+
+        var nameTaken = await _categoryRepository.ExistsByNameAsync(tenantId, dto.CategoryName);
+        if (nameTaken)
+            throw new InvalidOperationException("A category with this name already exists in this tenant.");
+
+        var category = new Category(tenantId, dto.CategoryName, dto.Description);
+
+        await _categoryRepository.AddAsync(category);
+
+        return _mapper.Map<CategoryResponseDto>(category);
+    }
+
+    public async Task<CategoryResponseDto> UpdateAsync(Guid id, UpdateCategoryDto dto)
+    {
+        var category = await _categoryRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Category with ID '{id}' not found.");
+
+        if (category.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot modify categories from another tenant.");
+
+        if (!string.Equals(category.CategoryName, dto.CategoryName, StringComparison.OrdinalIgnoreCase))
+        {
+            var nameTaken = await _categoryRepository.ExistsByNameAsync(category.TenantId, dto.CategoryName);
+            if (nameTaken)
+                throw new InvalidOperationException("A category with this name already exists in this tenant.");
+        }
+
+        category.Rename(dto.CategoryName);
+        category.UpdateDescription(dto.Description);
+
+        if (dto.IsActive)
+            category.Activate();
+        else
+            category.Deactivate();
+
+        await _categoryRepository.UpdateAsync(category);
+
+        return _mapper.Map<CategoryResponseDto>(category);
+    }
+
+    public async Task DeleteAsync(Guid id)
+    {
+        var category = await _categoryRepository.GetByIdAsync(id)
+            ?? throw new KeyNotFoundException($"Category with ID '{id}' not found.");
+
+        if (category.TenantId != _currentTenantService.GetTenantId())
+            throw new UnauthorizedAccessException("You cannot delete categories from another tenant.");
+
+        var ticketCount = await _categoryRepository.GetTicketCountByCategoryAsync(id);
+        if (ticketCount > 0)
+            throw new InvalidOperationException("Cannot delete a category that still has tickets assigned to it.");
+
+        await _categoryRepository.DeleteAsync(id);
+    }
+}
