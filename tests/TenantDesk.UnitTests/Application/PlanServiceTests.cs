@@ -182,7 +182,7 @@ public class PlanServiceTests
         var plan = new Plan(planName, 100);
         TestEntityHelper.SetProperty(plan, "PlanId", planId);
 
-        var dto = new ChangePlanRateLimitDto(500);
+        var dto = new ChangePlanRateLimitDto(5000);
 
         _repositoryMock.Setup(r => r.GetByIdAsync(planId))
             .ReturnsAsync(plan);
