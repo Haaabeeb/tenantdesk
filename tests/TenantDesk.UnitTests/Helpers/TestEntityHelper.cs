@@ -22,19 +22,7 @@ public static class TestEntityHelper
             throw new ArgumentException($"Property '{propertyName}' was not found on type '{type.FullName}'.", nameof(propertyName));
 
         var setter = property.GetSetMethod(nonPublic: true);
-        if (setter is null)
-        {
-            // search backing field if auto-property with only get
-            var field = type.GetField($"<{propertyName}>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
-            if (field is not null)
-            {
-                field.SetValue(entity, value);
-                return;
-            }
-
-            throw new ArgumentException($"Property '{propertyName}' on type '{type.FullName}' has no accessible setter or backing field.", nameof(propertyName));
-        }
-
+     
         property.SetValue(entity, value, null);
     }
 }
