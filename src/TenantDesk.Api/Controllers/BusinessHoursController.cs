@@ -1,10 +1,12 @@
 
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using TenantDesk.Application.Dto.BusinessHour;
 using TenantDesk.Application.Services;
 
 namespace TenantDesk.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/business-hours")]
 public class BusinessHoursController : ControllerBase
@@ -17,6 +19,7 @@ public class BusinessHoursController : ControllerBase
     }
 
     // POST: api/business-hours
+    [Authorize(Roles = "Admin")]
     [HttpPost]
     public async Task<ActionResult<BusinessHourResponseDto>> Create([FromBody] CreateBusinessHourDto dto)
     {
@@ -25,6 +28,7 @@ public class BusinessHoursController : ControllerBase
     }
 
     // GET: api/business-hours/{id}
+    [Authorize(Roles = "Admin,Agent,Customer")]
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<BusinessHourResponseDto>> GetById(Guid id)
     {
@@ -33,6 +37,7 @@ public class BusinessHoursController : ControllerBase
     }
 
     // GET: api/business-hours
+    [Authorize(Roles = "Admin,Agent,Customer")]
     [HttpGet]
     public async Task<ActionResult<IEnumerable<BusinessHourResponseDto>>> GetAll()
     {
@@ -41,6 +46,7 @@ public class BusinessHoursController : ControllerBase
     }
 
     // GET: api/business-hours/day/{day}
+    [Authorize(Roles = "Admin,Agent,Customer")]
     [HttpGet("day/{day}")]
     public async Task<ActionResult<BusinessHourResponseDto>> GetByDay(DayOfWeek day)
     {
@@ -49,6 +55,7 @@ public class BusinessHoursController : ControllerBase
     }
 
     // PUT: api/business-hours/{id}
+    [Authorize(Roles = "Admin")]
     [HttpPut("{id:guid}")]
     public async Task<ActionResult<BusinessHourResponseDto>> Update(Guid id, [FromBody] UpdateBusinessHourDto dto)
     {
@@ -57,6 +64,7 @@ public class BusinessHoursController : ControllerBase
     }
 
     // DELETE: api/business-hours/{id}
+    [Authorize(Roles = "Admin")]
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {

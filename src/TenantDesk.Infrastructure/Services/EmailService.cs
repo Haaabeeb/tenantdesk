@@ -59,8 +59,8 @@ public class EmailService : IEmailService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to send email to {To}", to);
-            
+           _logger.LogError(ex,"Failed to send email. To: {To}, Subject: {Subject}, SMTP Host: {Host}, Port: {Port}",
+            to,subject,host,port );
         }
     }
 

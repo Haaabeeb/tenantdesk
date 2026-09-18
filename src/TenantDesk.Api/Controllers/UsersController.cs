@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using TenantDesk.Application.Common;
 using TenantDesk.Application.Dto.User;
@@ -6,14 +7,13 @@ using TenantDesk.Application.Services;
 
 namespace TenantDesk.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/[controller]")]
 public class UsersController(UserService _userService) : ControllerBase
 {
-
-    
-
     // GET: api/users/{id}
+    [Authorize(Roles = "Admin,Agent")]
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<UserResponseDto>> GetById(Guid id)
     {
@@ -23,6 +23,7 @@ public class UsersController(UserService _userService) : ControllerBase
     }
 
     // GET: api/users?role=Agent&isActive=true&page=1&pageSize=20
+    [Authorize(Roles = "Admin,Agent")]
     [HttpGet]
     public async Task<ActionResult<PagedResult<UserResponseDto>>> GetFiltered([FromQuery] UserFilter filter)
     {
@@ -32,6 +33,7 @@ public class UsersController(UserService _userService) : ControllerBase
     }
 
     // PUT: api/users/{id}
+    [Authorize(Roles = "Admin")]
     [HttpPut("{id:guid}")]
     public async Task<ActionResult<UserResponseDto>> Update(Guid id, UpdateUserDto dto)
     {
@@ -41,6 +43,7 @@ public class UsersController(UserService _userService) : ControllerBase
     }
 
     // PUT: api/users/{id}/status
+    [Authorize(Roles = "Admin")]
     [HttpPut("{id:guid}/status")]
     public async Task<IActionResult> ChangeStatus(Guid id, ChangeUserStatusDto dto)
     {
@@ -50,6 +53,7 @@ public class UsersController(UserService _userService) : ControllerBase
     }
 
     // DELETE: api/users/{id}
+    [Authorize(Roles = "Admin")]
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {

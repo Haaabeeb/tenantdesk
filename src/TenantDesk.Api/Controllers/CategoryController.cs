@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using TenantDesk.Application.Common;
 using TenantDesk.Application.Dto.Category;
@@ -6,11 +7,13 @@ using TenantDesk.Application.Services;
 
 namespace TenantDesk.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/[controller]")]
 public class CategoriesController(CategoryService _categoryService) : ControllerBase
 {
     // POST: api/categories
+    [Authorize(Roles = "Admin")]
     [HttpPost]
     public async Task<ActionResult<CategoryResponseDto>> Create(CreateCategoryDto dto)
     {
@@ -23,6 +26,7 @@ public class CategoriesController(CategoryService _categoryService) : Controller
     }
 
     // GET: api/categories/{id}
+    [Authorize(Roles = "Admin,Agent,Customer")]
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<CategoryResponseDto>> GetById(Guid id)
     {
@@ -32,6 +36,7 @@ public class CategoriesController(CategoryService _categoryService) : Controller
     }
 
     // GET: api/categories?isActive=true&page=1&pageSize=20
+    [Authorize(Roles = "Admin,Agent,Customer")]
     [HttpGet]
     public async Task<ActionResult<PagedResult<CategoryResponseDto>>> GetFiltered([FromQuery] CategoryFilter filter)
     {
@@ -41,6 +46,7 @@ public class CategoriesController(CategoryService _categoryService) : Controller
     }
 
     // PUT: api/categories/{id}
+    [Authorize(Roles = "Admin")]
     [HttpPut("{id:guid}")]
     public async Task<ActionResult<CategoryResponseDto>> Update(Guid id, UpdateCategoryDto dto)
     {
@@ -50,6 +56,7 @@ public class CategoriesController(CategoryService _categoryService) : Controller
     }
 
     // DELETE: api/categories/{id}
+    [Authorize(Roles = "Admin")]
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {

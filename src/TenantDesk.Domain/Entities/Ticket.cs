@@ -8,6 +8,8 @@ namespace TenantDesk.Domain.Entities
         public Guid TenantId { get; private set; }
         public Guid CategoryId { get; private set; }
         public Guid SlaId { get; private set; }
+        //navigation property 
+        public Sla Sla { get; private set; } = null!;
         public Guid CreatedBy { get; private set; }
         public Guid? AssignedTo { get; private set; }
         public string Title { get; private set; }
@@ -84,6 +86,5 @@ namespace TenantDesk.Domain.Entities
             UpdatedAt = DateTime.UtcNow;
         }
     }
-
-    
 }
+

@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
 using TenantDesk.Application.Dto.Auth;
 using TenantDesk.Application.Interfaces.Identity;
 
@@ -10,6 +11,7 @@ public class AuthController(IAuthService authService) : ControllerBase
 {
     private readonly IAuthService _authService = authService;
 
+    [AllowAnonymous]
     [HttpPost("register")]
     public async Task<ActionResult<AuthResponseDto>> Register(RegisterDto dto)
     {
@@ -18,7 +20,7 @@ public class AuthController(IAuthService authService) : ControllerBase
         return Ok(result);
     }
 
-    
+    [AllowAnonymous]
     [HttpPost("login")]
     public async Task<ActionResult<AuthResponseDto>> Login(LoginDto dto)
     {

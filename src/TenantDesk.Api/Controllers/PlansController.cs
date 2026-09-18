@@ -1,9 +1,12 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
 using TenantDesk.Application.Services;
 using TenantDesk.Application.Dto.Plan;
 
+
 namespace TenantDesk.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/plans")]
 public class PlansController(PlanService planService) : ControllerBase
@@ -11,6 +14,7 @@ public class PlansController(PlanService planService) : ControllerBase
     private readonly PlanService _planService = planService;
 
     // POST: api/plans
+    [Authorize(Roles = "Admin")]
     [HttpPost]
     public async Task<IActionResult> CreatePlan(CreatePlanDto dto)
     {
@@ -23,6 +27,7 @@ public class PlansController(PlanService planService) : ControllerBase
     }
 
     // GET: api/plans/{planId}
+    [Authorize(Roles = "Admin,Agent,Customer")]
     [HttpGet("{planId}")]
     public async Task<IActionResult> GetPlanById(Guid planId)
     {
@@ -32,6 +37,7 @@ public class PlansController(PlanService planService) : ControllerBase
     }
 
     // GET: api/plans
+    [Authorize(Roles = "Admin,Agent,Customer")]
     [HttpGet]
     public async Task<IActionResult> GetAllPlans()
     {
@@ -41,6 +47,7 @@ public class PlansController(PlanService planService) : ControllerBase
     }
 
     // PUT: api/plans/{planId}/rate-limit
+    [Authorize(Roles = "Admin")]
     [HttpPut("{planId}/rate-limit")]
     public async Task<IActionResult> ChangeRateLimit(
         Guid planId,
@@ -52,6 +59,7 @@ public class PlansController(PlanService planService) : ControllerBase
     }
 
     // DELETE: api/plans/{id}
+    [Authorize(Roles = "Admin")]
     [HttpDelete("{id}")]
     public async Task<IActionResult> Delete(Guid id)
     {

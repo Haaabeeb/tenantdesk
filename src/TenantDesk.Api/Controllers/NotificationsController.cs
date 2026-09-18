@@ -8,6 +8,7 @@ using TenantDesk.Application.Services;
 
 namespace TenantDesk.Api.Controllers;
 
+[Authorize(Roles = "Admin,Agent,Customer")]
 [ApiController]
 [Route("api/[controller]")]
 public class NotificationsController(NotificationService notificationService) : ControllerBase

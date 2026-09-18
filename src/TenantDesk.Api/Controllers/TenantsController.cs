@@ -1,9 +1,11 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using TenantDesk.Application.Dto.Tenant;
 using TenantDesk.Application.Services;
 
 namespace TenantDesk.Api.Controllers;
 
+[Authorize(Roles = "Admin")]
 [ApiController]
 [Route("api/[controller]")]
 public class TenantsController(TenantService tenantService) : ControllerBase

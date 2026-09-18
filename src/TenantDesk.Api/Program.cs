@@ -9,6 +9,7 @@ using TenantDesk.Infrastructure.Repositories;
 using TenantDesk.Infrastructure.Identity;
 using TenantDesk.Infrastructure.Services;
 using TenantDesk.Infrastructure.BackgroundServices;
+using TenantDesk.Infrastructure.HealthChecks;
 using TenantDesk.Api.Middleware;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
@@ -16,10 +17,18 @@ using Microsoft.IdentityModel.Tokens;
 using TenantDesk.Domain.Entities;
 using System.Text;
 using TenantDesk.Application.Mapping;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+
+using TenantDesk.Api.Filters;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddControllers();
+builder.Services.AddScoped<RequestLoggingFilter>();
+builder.Services.AddControllers(options =>
+{
+    options.Filters.AddService<RequestLoggingFilter>();
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -32,6 +41,10 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         ServerVersion.AutoDetect(connectionString)
     )
 );
+
+builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>("database")
+    .AddCheck<EmailHealthCheck>("email");
+
 builder.Services.AddAutoMapper(typeof(UserMappingProfile).Assembly);
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 
@@ -45,6 +58,8 @@ builder.Services.AddScoped<TenantService>();
 builder.Services.AddScoped<ISlaRepository, SlaRepository>();
 builder.Services.AddScoped<SlaService>();
 
+builder.Services.AddScoped<ITicketRepository, TicketRepository>();
+
 builder.Services.AddScoped<IBusinessHourRepository, BusinessHourRepository>();
 builder.Services.AddScoped<BusinessHourService>();
 
@@ -55,11 +70,7 @@ builder.Services.AddScoped<ISlaCalculatorService, SlaCalculatorService>();
 builder.Services.AddScoped<INotificationRepository, NotificationRepository>();
 builder.Services.AddScoped<INotificationDispatcher, NotificationDispatcher>();
 builder.Services.AddScoped<IEmailService, EmailService>();
-
-builder.Services.AddScoped<INotificationRepository, NotificationRepository>();
 builder.Services.AddScoped<NotificationService>();
-builder.Services.AddScoped<INotificationDispatcher, NotificationDispatcher>();
-builder.Services.AddScoped<IEmailService, EmailService>();
 
 builder.Services.AddHostedService<NotificationCleanupJob>();
 
@@ -118,5 +129,26 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+
+        var response = new
+        {
+            status = report.Status.ToString(),
+            checks = report.Entries.Select(check => new
+            {
+                name = check.Key,
+                status = check.Value.Status.ToString(),
+                description = check.Value.Description
+            })
+        };
+
+        await context.Response.WriteAsJsonAsync(response);
+    }
+});
 
 app.Run();
