@@ -13,6 +13,7 @@ public class User
     public bool IsActive { get; private set; }
     public DateTime CreatedAt { get; private set; }
     public DateTime? UpdatedAt { get; private set; }
+    public string PasswordHash { get; private set; } = string.Empty;
 
     public Tenant Tenant { get; private set; } = null!;
 
@@ -39,8 +40,6 @@ public class User
         Role = newRole;
         UpdateTimestamp();
     }
-
-    public string PasswordHash { get; private set; } = string.Empty;
 
     public void SetPassword(string passwordHash)
     {

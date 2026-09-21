@@ -11,6 +11,7 @@ using TenantDesk.Infrastructure.Identity;
 using TenantDesk.Infrastructure.Services;
 using TenantDesk.Infrastructure.BackgroundServices;
 using TenantDesk.Infrastructure.HealthChecks;
+using TenantDesk.Infrastructure.Settings;
 using TenantDesk.Api.Middleware;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
@@ -69,6 +70,9 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     )
 );
 
+builder.Services.Configure<SmtpSettings>(
+    builder.Configuration.GetSection("Smtp"));
+    
 builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>("database")
     .AddCheck<EmailHealthCheck>("email");
 
@@ -110,6 +114,13 @@ builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<NotificationService>();
 
 builder.Services.AddHostedService<NotificationCleanupJob>();
+
+// --- Background email queue (System.Threading.Channels) ---
+// Must be Singleton: the same Channel<EmailJob> instance must be shared between
+// the scoped TicketService (producer) and the singleton EmailDispatchWorker (consumer).
+builder.Services.AddSingleton<IEmailJobQueue, EmailJobQueue>();
+builder.Services.AddHostedService<EmailDispatchWorker>();
+// --- end background email queue ---
 
 
 builder.Services.AddHttpContextAccessor();

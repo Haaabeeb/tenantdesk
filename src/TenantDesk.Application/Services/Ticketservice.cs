@@ -1,10 +1,12 @@
 using AutoMapper;
+using Microsoft.Extensions.Logging;
 using TenantDesk.Application.Common;
 using TenantDesk.Application.Dto.Ticket;
 using TenantDesk.Application.Interfaces;
 using TenantDesk.Application.Interfaces.Identity;
 using TenantDesk.Application.Interfaces.Persistence.Filters;
 using TenantDesk.Application.Interfaces.Services;
+using TenantDesk.Application.Models;
 using TenantDesk.Domain.Entities;
 using TenantDesk.Domain.Enums;
 
@@ -17,6 +19,9 @@ public class TicketService(
     ICurrentTenantService _currentTenantService,
     ICurrentUserService _currentUserService,
     INotificationDispatcher _notificationDispatcher,
+    IUserRepository _userRepository,
+    IEmailJobQueue _emailJobQueue,
+    ILogger<TicketService> _logger,
     IMapper _mapper)
 {
     public async Task<TicketResponseDto> CreateAsync(CreateTicketDto dto)
@@ -40,6 +45,50 @@ public class TicketService(
 
         await _ticketRepository.AddAsync(ticket);
 
+        // --- Step 1: Persist an in-app notification for the ticket creator ---
+        await _notificationDispatcher.DispatchAsync(
+            userId,
+            NotificationType.TicketCreated,
+            $"Your ticket '{ticket.Title}' has been created successfully.",
+            ticket.TicketId);
+
+        // --- Step 2: Resolve creator email and enqueue an email delivery job ---
+        // We look up the user record directly so the job carries a concrete email
+        // address rather than relying on any HTTP-request-scoped context.
+        var creator = await _userRepository.GetByIdAsync(userId);
+        if (creator is not null)
+        {
+            var emailBody = string.Concat(
+                "<p>Hello,</p>",
+                "<p>Thank you for contacting us. Your ticket has been received and is now open.</p>",
+                $"<p><strong>Ticket:</strong> {ticket.Title}</p>",
+                "<p>We will get back to you as soon as possible.</p>",
+                "<p>TenantDesk Support</p>");
+
+            var emailJob = new EmailJob
+            {
+                TenantId = tenantId,
+                TicketId = ticket.TicketId,
+                To       = creator.Email,
+                Subject  = $"Your ticket has been created: {ticket.Title}",
+                Body     = emailBody
+            };
+
+            await _emailJobQueue.EnqueueAsync(emailJob);
+
+            _logger.LogInformation(
+                "Email job enqueued for TicketId: {TicketId}, TenantId: {TenantId}, To: {To}",
+                ticket.TicketId, tenantId, creator.Email);
+        }
+        else
+        {
+            // Creator not found in DB — unusual, but we must not crash the request.
+            _logger.LogWarning(
+                "Could not find creator user {UserId} for TicketId: {TicketId}. Email job was NOT enqueued.",
+                userId, ticket.TicketId);
+        }
+
+        // --- Step 3: Return HTTP response immediately (email is sent asynchronously) ---
         return _mapper.Map<TicketResponseDto>(ticket);
     }
 

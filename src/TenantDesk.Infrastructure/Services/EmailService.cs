@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Mail;
-using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
+using TenantDesk.Infrastructure.Settings;
 using Microsoft.Extensions.Logging;
 using TenantDesk.Application.Interfaces.Services;
 
@@ -8,28 +9,20 @@ namespace TenantDesk.Infrastructure.Services;
 
 public class EmailService : IEmailService
 {
-    private readonly IConfiguration _configuration;
+    private readonly SmtpSettings _smtpSettings;
     private readonly ILogger<EmailService> _logger;
 
-    public EmailService(IConfiguration configuration, ILogger<EmailService> logger)
+    public EmailService(IOptions<SmtpSettings> smtpSettings, ILogger<EmailService> logger)
     {
-        _configuration = configuration;
+        _smtpSettings = smtpSettings.Value;
         _logger = logger;
     }
 
+    
     public async Task SendAsync(string to, string subject, string body)
     {
-        var smtpConfig = _configuration.GetSection("Smtp");
-        var host = smtpConfig["Host"];
-        var port = int.TryParse(smtpConfig["Port"], out var p) ? p : 587;
-        var userName = smtpConfig["UserName"];
-        var password = smtpConfig["Password"];
-        var fromAddress = smtpConfig["FromAddress"] ?? "no-reply@tenantdesk.com";
-        var fromName = smtpConfig["FromName"] ?? "TenantDesk Support";
-        var enableSsl = bool.TryParse(smtpConfig["EnableSsl"], out var ssl) && ssl;
 
-        
-        if (string.IsNullOrWhiteSpace(host))
+        if (string.IsNullOrWhiteSpace(_smtpSettings.Host))
         {
             _logger.LogWarning("[SMTP Unconfigured] Email to {To} with Subject '{Subject}': {Body}", to, subject, body);
             return;
@@ -39,18 +32,18 @@ public class EmailService : IEmailService
         {
             using var message = new MailMessage
             {
-                From = new MailAddress(fromAddress, fromName),
+                From = new MailAddress(_smtpSettings.FromAddress, _smtpSettings.FromName),
                 Subject = subject,
                 Body = body,
                 IsBodyHtml = true
             };
             message.To.Add(to);
 
-            using var client = new SmtpClient(host, port)
+            using var client = new SmtpClient(_smtpSettings.Host, _smtpSettings.Port)
             {
-                EnableSsl = enableSsl,
-                Credentials = !string.IsNullOrWhiteSpace(userName) 
-                    ? new NetworkCredential(userName, password) 
+                EnableSsl = _smtpSettings.EnableSsl,
+                Credentials = !string.IsNullOrWhiteSpace(_smtpSettings.UserName) 
+                    ? new NetworkCredential(_smtpSettings.UserName, _smtpSettings.Password) 
                     : CredentialCache.DefaultNetworkCredentials
             };
 
@@ -60,7 +53,7 @@ public class EmailService : IEmailService
         catch (Exception ex)
         {
            _logger.LogError(ex,"Failed to send email. To: {To}, Subject: {Subject}, SMTP Host: {Host}, Port: {Port}",
-            to,subject,host,port );
+            to,subject,_smtpSettings.Host,_smtpSettings.Port );
         }
     }
 
