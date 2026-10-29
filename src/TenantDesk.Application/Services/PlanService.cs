@@ -83,31 +83,30 @@ public class PlanService(
      private readonly SemaphoreSlim _lock = new(1, 1);
 
     public async Task<IEnumerable<PlanResponseDto>> GetAllAsync()
+    {
+        if (_cache.TryGetValue(PlansCacheKey, out IEnumerable<PlanResponseDto>? cachedPlans))
+            return cachedPlans!;
+
+        await _lock.WaitAsync();
+
+        try
         {
-            if (_cache.TryGetValue(PlansCacheKey, out IEnumerable<PlanResponseDto>? cachedPlans))
+            if (_cache.TryGetValue(PlansCacheKey, out cachedPlans))
                 return cachedPlans!;
 
-            await _lock.WaitAsync();
+            var plans = await _repository.GetAllAsync();
 
-            try
-            {
-                if (_cache.TryGetValue(PlansCacheKey, out cachedPlans))
-                    return cachedPlans!;
+            var result = _mapper.Map<IEnumerable<PlanResponseDto>>(plans);
 
-                var plans = await _repository.GetAllAsync();
+            _cache.Set(PlansCacheKey, result, TimeSpan.FromMinutes(10));
 
-                var result = _mapper.Map<IEnumerable<PlanResponseDto>>(plans);
-
-                _cache.Set(PlansCacheKey, result, TimeSpan.FromMinutes(10));
-
-                return result;
-            }
-            finally
-            {
-                _lock.Release();
-            }
+            return result;
         }
-
+        finally
+        {
+            _lock.Release();
+        }
+    }
 
     public async Task<PlanResponseDto> GetByIdAsync(Guid planId)
     {

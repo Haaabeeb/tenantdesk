@@ -21,7 +21,6 @@ using System.Text;
 using TenantDesk.Application.Mapping;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
-
 using TenantDesk.Api.Filters;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -123,7 +122,6 @@ builder.Services.AddHostedService<NotificationCleanupJob>();
 builder.Services.AddSingleton<IEmailJobQueue, EmailJobQueue>();
 builder.Services.AddHostedService<EmailDispatchWorker>();
 // --- end background email queue ---
-
 
 builder.Services.AddHttpContextAccessor();
 

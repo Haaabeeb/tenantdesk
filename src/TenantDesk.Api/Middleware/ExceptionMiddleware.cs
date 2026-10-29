@@ -22,11 +22,8 @@ public class ExceptionMiddleware(
             context.Response.StatusCode = ex switch
             {
                 KeyNotFoundException => StatusCodes.Status404NotFound,
-
                 UnauthorizedAccessException => StatusCodes.Status403Forbidden,
-
                 InvalidOperationException => StatusCodes.Status409Conflict,
-
                 _ => StatusCodes.Status400BadRequest
             };
 
@@ -36,5 +33,4 @@ public class ExceptionMiddleware(
             });
         }
     }
-    
 }
