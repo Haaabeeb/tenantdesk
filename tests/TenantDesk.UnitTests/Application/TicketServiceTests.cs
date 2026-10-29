@@ -1,4 +1,5 @@
 using AutoMapper;
+using Microsoft.Extensions.Logging;
 using Moq;
 using TenantDesk.Application.Common;
 using TenantDesk.Application.Dto.Ticket;
@@ -22,6 +23,9 @@ public class TicketServiceTests
     private readonly Mock<ICurrentTenantService> _mockCurrentTenantService;
     private readonly Mock<ICurrentUserService> _mockCurrentUserService;
     private readonly Mock<INotificationDispatcher> _mockNotificationDispatcher;
+    private readonly Mock<IUserRepository> _mockUserRepository;
+    private readonly Mock<IEmailJobQueue> _mockEmailJobQueue;
+    private readonly Mock<ILogger<TicketService>> _mockLogger;
     private readonly Mock<IMapper> _mockMapper;
     private readonly TicketService _sut;
     private readonly Guid _tenantId;
@@ -35,6 +39,9 @@ public class TicketServiceTests
         _mockCurrentTenantService = new Mock<ICurrentTenantService>();
         _mockCurrentUserService = new Mock<ICurrentUserService>();
         _mockNotificationDispatcher = new Mock<INotificationDispatcher>();
+        _mockUserRepository = new Mock<IUserRepository>();
+        _mockEmailJobQueue = new Mock<IEmailJobQueue>();
+        _mockLogger = new Mock<ILogger<TicketService>>();
         _mockMapper = new Mock<IMapper>();
 
         _tenantId = Guid.NewGuid();
@@ -51,6 +58,9 @@ public class TicketServiceTests
             _mockCurrentTenantService.Object,
             _mockCurrentUserService.Object,
             _mockNotificationDispatcher.Object,
+            _mockUserRepository.Object,
+            _mockEmailJobQueue.Object,
+            _mockLogger.Object,
             _mockMapper.Object);
     }
 

@@ -96,6 +96,8 @@ builder.Services.AddScoped<TenantService>();
 // --- end Phase 2 ---
 builder.Services.AddScoped<ITicketRepository, TicketRepository>();
 builder.Services.AddScoped<TicketService>();
+builder.Services.AddScoped<ITicketFeedbackRepository, TicketFeedbackRepository>();
+builder.Services.AddScoped<ITicketFeedbackService, TicketFeedbackService>();
 builder.Services.AddScoped<ISlaRepository, SlaRepository>();
 builder.Services.AddScoped<SlaService>();
 builder.Services.AddScoped<DashboardService>();
