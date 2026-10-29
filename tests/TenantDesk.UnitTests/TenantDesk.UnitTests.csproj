@@ -10,9 +10,10 @@
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="Moq" Version="4.20.72" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.2.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
-    <PackageReference Include="Moq" Version="4.20.72" />
   </ItemGroup>
 
   <ItemGroup>
@@ -20,8 +21,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\TenantDesk.Domain\TenantDesk.Domain.csproj" />
     <ProjectReference Include="..\..\src\TenantDesk.Application\TenantDesk.Application.csproj" />
+    <ProjectReference Include="..\..\src\TenantDesk.Domain\TenantDesk.Domain.csproj" />
+    <ProjectReference Include="..\..\src\TenantDesk.Infrastructure\TenantDesk.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>
